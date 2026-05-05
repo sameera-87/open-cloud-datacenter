@@ -75,6 +75,7 @@ variable "machine_pools" {
 variable "user_data" {
   type        = string
   description = "Cloud-init user_data for cluster nodes."
+  sensitive   = true
 }
 
 variable "manage_rke_config" {
