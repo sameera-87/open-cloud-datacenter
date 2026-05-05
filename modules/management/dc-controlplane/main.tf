@@ -9,6 +9,10 @@
 module "project" {
   source = "../tenant-space"
 
+  providers = {
+    kubernetes.harvester = kubernetes.harvester
+  }
+
   cluster_id               = var.harvester_cluster_id
   project_name             = var.project_name
   create_default_namespace = true
