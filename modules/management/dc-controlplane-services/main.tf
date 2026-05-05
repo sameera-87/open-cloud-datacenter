@@ -36,6 +36,11 @@ resource "kubernetes_namespace" "arc_systems" {
 resource "kubernetes_namespace" "arc_runners" {
   metadata {
     name = "arc-runners"
+    labels = {
+      # dind container mode requires privileged pods; declare that explicitly
+      # so PSA admission controllers don't silently block runner pod startup.
+      "pod-security.kubernetes.io/enforce" = "privileged"
+    }
   }
   lifecycle {
     ignore_changes = [metadata[0].annotations]
@@ -218,6 +223,15 @@ resource "kubernetes_stateful_set_v1" "dc_postgres" {
             }
             initial_delay_seconds = 5
             period_seconds        = 5
+          }
+
+          liveness_probe {
+            exec {
+              command = ["pg_isready", "-U", "dc_api"]
+            }
+            initial_delay_seconds = 30
+            period_seconds        = 15
+            failure_threshold     = 3
           }
         }
       }
