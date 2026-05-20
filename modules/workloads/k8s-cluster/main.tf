@@ -312,7 +312,7 @@ data "rancher2_cluster" "harvester" {
 
 data "rancher2_cluster_v2" "harvester" {
   count = var.create_cloud_credential ? 1 : 0
-  name  = var.harvester_cluster_name != "" ? data.rancher2_cluster.harvester[0].name : var.harvester_cluster_id
+  name  = var.harvester_cluster_name != "" ? data.rancher2_cluster.harvester[0].id : var.harvester_cluster_id
 }
 
 data "http" "harvester_cloud_provider_kubeconfig" {
