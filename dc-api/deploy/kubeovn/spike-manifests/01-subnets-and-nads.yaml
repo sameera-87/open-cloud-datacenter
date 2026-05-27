@@ -1,0 +1,77 @@
+# Subnets + NetworkAttachmentDefinitions binding them to multus.
+#
+# Provider-string convention (KubeOVN multus mode):
+#   <nad-name>.<namespace>.ovn      — used in BOTH the NAD config and the
+#                                     Subnet's spec.provider field. This is
+#                                     how KubeOVN links a multus-attached
+#                                     interface to its IPAM.
+#
+# What this proves:
+#   - Two non-overlapping subnets in one VPC, each backed by KubeOVN IPAM.
+#   - Multus-secondary attachment works (Canal stays primary on the cluster).
+#   - DC-API's kubeovn driver will construct exactly this shape for
+#     POST /v1/vnets/{id}/subnets.
+---
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: spike-nad-a1
+  namespace: kubeovn-spike
+spec:
+  config: |
+    {
+      "cniVersion": "0.3.1",
+      "type": "kube-ovn",
+      "server_socket": "/run/openvswitch/kube-ovn-daemon.sock",
+      "provider": "spike-nad-a1.kubeovn-spike.ovn"
+    }
+---
+apiVersion: kubeovn.io/v1
+kind: Subnet
+metadata:
+  name: spike-subnet-a1
+  labels:
+    purpose: m2-networking-spike
+spec:
+  vpc: spike-vpc-a
+  protocol: IPv4
+  provider: spike-nad-a1.kubeovn-spike.ovn
+  cidrBlock: 10.99.1.0/24
+  gateway: 10.99.1.1
+  excludeIps:
+    - 10.99.1.1
+  namespaces:
+    - kubeovn-spike
+  private: false
+---
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: spike-nad-a2
+  namespace: kubeovn-spike
+spec:
+  config: |
+    {
+      "cniVersion": "0.3.1",
+      "type": "kube-ovn",
+      "server_socket": "/run/openvswitch/kube-ovn-daemon.sock",
+      "provider": "spike-nad-a2.kubeovn-spike.ovn"
+    }
+---
+apiVersion: kubeovn.io/v1
+kind: Subnet
+metadata:
+  name: spike-subnet-a2
+  labels:
+    purpose: m2-networking-spike
+spec:
+  vpc: spike-vpc-a
+  protocol: IPv4
+  provider: spike-nad-a2.kubeovn-spike.ovn
+  cidrBlock: 10.99.2.0/24
+  gateway: 10.99.2.1
+  excludeIps:
+    - 10.99.2.1
+  namespaces:
+    - kubeovn-spike
+  private: false

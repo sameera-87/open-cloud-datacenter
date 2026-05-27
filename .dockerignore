@@ -1,0 +1,9 @@
+cloud-ui/node_modules
+cloud-ui/dist
+cloud-ui/.env*
+cloud-ui/coverage
+*.log
+.DS_Store
+.git
+dc-api/test-output
+dc-api/webhook

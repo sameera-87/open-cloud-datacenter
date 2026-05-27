@@ -1,0 +1,24 @@
+# Spike test resources — namespace + custom VPC.
+#
+# What this proves: a tenant-scoped VPC exists as a CRD, with its own logical
+# router separate from the cluster default VPC (ovn-cluster). When DC-API
+# implements POST /v1/vnets, this is the shape the kubeovn driver constructs.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kubeovn-spike
+  labels:
+    purpose: m2-networking-spike
+    delete-after-spike: "true"
+---
+apiVersion: kubeovn.io/v1
+kind: Vpc
+metadata:
+  name: spike-vpc-a
+  labels:
+    purpose: m2-networking-spike
+spec:
+  namespaces:
+    - kubeovn-spike
+  # No staticRoutes / policyRoutes for the spike — default routing within VPC.

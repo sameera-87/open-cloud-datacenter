@@ -1,0 +1,27 @@
+# Ingress resource for DC-API.
+# Hostname: dcapi.lk-dev.internal.wso2.com — add this to your /etc/hosts or internal DNS:
+#   192.168.10.38  dcapi.lk-dev.internal.wso2.com
+# `.lk-dev.` is the dev-environment prefix; a future prod env will live at
+# `dcapi.lk.internal.wso2.com` (or a public URL). No TLS for now — add
+# cert-manager + ClusterIssuer when M3 lands.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: dc-api
+  namespace: dc-system
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: dcapi.lk-dev.internal.wso2.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: dc-api
+                port:
+                  number: 80

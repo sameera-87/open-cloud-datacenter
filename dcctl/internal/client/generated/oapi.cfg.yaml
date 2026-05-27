@@ -1,0 +1,11 @@
+package: dcapi
+output: dcapi.gen.go
+generate:
+  models: true
+  client: true
+output-options:
+  # Several response bodies are named CreateXResponse in the spec, which
+  # collides with oapi-codegen's default per-operation parsed-response
+  # wrapper. Suffix the wrappers with "Resp" instead so they stay distinct.
+  response-type-suffix: Resp
+  skip-prune: true

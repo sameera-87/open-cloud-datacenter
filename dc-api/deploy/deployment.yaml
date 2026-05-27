@@ -1,0 +1,130 @@
+# DC-API Kubernetes Deployment + Service
+# Deploy this to the management RKE2 cluster in lk-dev.
+# The management cluster has private network access to both Harvester and Rancher.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dc-api
+  namespace: dc-system
+  labels:
+    app: dc-api
+spec:
+  replicas: 1    # increase to 2 for HA once lk-dev is stable
+  selector:
+    matchLabels:
+      app: dc-api
+  template:
+    metadata:
+      labels:
+        app: dc-api
+    spec:
+      # DC-API runs as nonroot (uid 65532 — matches distroless/static:nonroot).
+      # This prevents privilege escalation even if the binary is compromised.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+      imagePullSecrets:
+        - name: ghcr-pull-secret
+      containers:
+        - name: dc-api
+          image: ghcr.io/hiranadikari/dc-api:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+          # All non-secret config from ConfigMap
+          envFrom:
+            - configMapRef:
+                name: dc-api-config
+          # Secrets injected as individual env vars
+          env:
+            - name: DCAPI_DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: dc-api-secrets
+                  key: DCAPI_DB_URL
+            - name: DCAPI_OIDC_AUDIENCE
+              valueFrom:
+                secretKeyRef:
+                  name: dc-api-secrets
+                  key: DCAPI_OIDC_AUDIENCE
+            - name: DCAPI_HARVESTER_KUBECONFIG
+              valueFrom:
+                secretKeyRef:
+                  name: dc-api-secrets
+                  key: DCAPI_HARVESTER_KUBECONFIG
+            - name: DCAPI_RANCHER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: dc-api-secrets
+                  key: DCAPI_RANCHER_TOKEN
+            - name: DCAPI_RANCHER_HARVESTER_CREDENTIAL
+              valueFrom:
+                secretKeyRef:
+                  name: dc-api-secrets
+                  key: DCAPI_RANCHER_HARVESTER_CREDENTIAL
+            - name: DCAPI_OPERATOR_SSH_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: dc-api-secrets
+                  key: DCAPI_OPERATOR_SSH_KEY
+                  optional: true
+            - name: DCAPI_OPERATOR_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: dc-api-secrets
+                  key: DCAPI_OPERATOR_PASSWORD
+                  optional: true
+          # Health checks — Kubernetes uses these to restart crashed pods
+          # and to hold traffic during rolling deploys.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+# ClusterIP service — DC-API is reachable inside the cluster at dc-api.dc-system:8080.
+# For external access (developers, dcctl), expose via an Ingress or NodePort.
+apiVersion: v1
+kind: Service
+metadata:
+  name: dc-api
+  namespace: dc-system
+spec:
+  selector:
+    app: dc-api
+  ports:
+    - port: 80
+      targetPort: 8080
+  type: ClusterIP
+---
+# NodePort alternative — uncomment for quick lk-dev access without an Ingress controller.
+# Exposes DC-API on every node at <node-ip>:30080.
+# apiVersion: v1
+# kind: Service
+# metadata:
+#   name: dc-api-nodeport
+#   namespace: dc-system
+# spec:
+#   selector:
+#     app: dc-api
+#   ports:
+#     - port: 80
+#       targetPort: 8080
+#       nodePort: 30080
+#   type: NodePort

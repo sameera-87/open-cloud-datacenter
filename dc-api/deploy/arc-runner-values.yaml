@@ -1,0 +1,12 @@
+# Reference the pre-existing secret created by create-secrets.sh (or by
+# Terraform in the dc-controlplane layer). The secret must live in the
+# same namespace as the helm release (arc-runners) and have a single
+# key `github_token` containing a classic PAT with the `repo` scope.
+githubConfigSecret: github-runner-pat
+
+containerMode:
+  type: dind
+
+template:
+  spec:
+    serviceAccountName: dc-api-deployer

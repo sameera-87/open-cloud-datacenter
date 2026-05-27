@@ -1,0 +1,43 @@
+---
+# MutatingWebhookConfiguration — reference copy.
+# The caBundle field must be set to the base64-encoded CA cert that signed the
+# webhook TLS certificate.  Terraform populates this from the cert-manager
+# Certificate resource (or the self-signed CA Secret).
+#
+# This file is NOT applied directly.  Edit the Terraform module instead.
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: dc-api-ovn-mac-webhook
+  annotations:
+    # cert-manager injects the CA bundle automatically when this annotation
+    # is present.  Remove if not using cert-manager.
+    cert-manager.io/inject-ca-from: dc-api/dc-api-webhook-cert
+webhooks:
+  - name: virtualmachines.kubevirt.io.dc-api.wso2.com
+    admissionReviewVersions: ["v1"]
+    clientConfig:
+      service:
+        name: dc-api-webhook
+        namespace: dc-api
+        path: /mutate
+        port: 443
+      # caBundle is populated by Terraform / cert-manager — do not edit here.
+      caBundle: ""
+    rules:
+      - apiGroups: ["kubevirt.io"]
+        apiVersions: ["v1"]
+        resources: ["virtualmachines"]
+        operations: ["CREATE", "UPDATE"]
+        scope: Namespaced
+    # failurePolicy:Ignore is intentional.
+    # The webhook is an enhancement, not enforcement: if it is down, normal VMs
+    # (those not on OVN NADs) must not be blocked.  OVN VMs without the
+    # annotations will simply fail to get the correct MAC allocation — the same
+    # failure mode as before the webhook existed.
+    failurePolicy: Ignore
+    sideEffects: None
+    timeoutSeconds: 5
+    # No namespaceSelector — we match by NAD type inside the handler, not by
+    # namespace.  The webhook no-ops on non-OVN VMs regardless of namespace.
+    reinvocationPolicy: Never

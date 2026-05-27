@@ -1,0 +1,38 @@
+# Non-secret configuration for DC-API.
+#
+# ⚠️ STALE — NOT APPLIED BY CI. Do not edit and expect the live ConfigMap
+# to change. The real ConfigMap (dc-api-config in dc-system) is managed by
+# Terraform in wso2-datacenter-project and carries ~20 keys including the
+# full DCAPI_BFF_* and DCAPI_VPC_EXTERNAL_* sets that are required for
+# dc-api to even boot. This file is a historical skeleton kept for context
+# only; CI's deploy.yaml workflow deliberately skips it (see the workflow's
+# "we deliberately do NOT re-apply" block). To change any DCAPI_* env var,
+# edit the TF module at:
+#   wso2-datacenter-project/environments/lk-dev/02-dc-controlplane-services/
+# and run terraform apply.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dc-api-config
+  namespace: dc-system
+data:
+  DCAPI_OIDC_ISSUER: "https://api.asgardeo.io/t/hiranadikari/oauth2/token"
+
+  DCAPI_RANCHER_URL: "https://rancher-lk-dev.wso2.com"
+
+  DCAPI_RANCHER_INSECURE: "false"
+
+  # Harvester namespace where tenant VMs are created
+  DCAPI_HARVESTER_NAMESPACE: "default"
+
+  # Provider selection
+  DCAPI_VM_PROVIDER: "harvester"
+  DCAPI_CLUSTER_PROVIDER: "rancher"
+
+  # Group mapping (defaults — change if your IdP uses different naming)
+  DCAPI_TENANT_GROUP_PREFIX: "dc-tenant-"
+  DCAPI_ADMIN_GROUP: "dc-admin"
+
+  # Logging and listen address
+  DCAPI_LOG_LEVEL: "info"
+  DCAPI_LISTEN_ADDR: ":8080"

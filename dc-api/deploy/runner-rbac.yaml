@@ -1,0 +1,45 @@
+# ServiceAccount for the GitHub Actions runner, with least-privilege access
+# to deploy DC-API into dc-system. The runner is in-cluster so no kubeconfig
+# secret is needed — kubectl picks up the mounted token automatically.
+#
+# Apply to dcapi-controlplane-rke2 (one-time bootstrap):
+#   kubectl --context dcapi-controlplane-rke2 apply -f runner-rbac.yaml
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dc-api-deployer
+  namespace: arc-runners
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: dc-api-deployer
+  namespace: dc-system
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces", "services", "configmaps", "persistentvolumeclaims"]
+    verbs: ["get", "list", "create", "update", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets"]
+    verbs: ["get", "list", "create", "update", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments/status", "statefulsets/status"]
+    verbs: ["get"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dc-api-deployer
+  namespace: dc-system
+subjects:
+  - kind: ServiceAccount
+    name: dc-api-deployer
+    namespace: arc-runners
+roleRef:
+  kind: Role
+  name: dc-api-deployer
+  apiGroup: rbac.authorization.k8s.io

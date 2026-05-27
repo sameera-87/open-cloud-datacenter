@@ -1,0 +1,21 @@
+# ── Stage 1: Builder ──────────────────────────────────────────────────────────
+FROM golang:1.26-alpine AS builder
+
+WORKDIR /src
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go build -ldflags="-s -w" -o /dc-api-webhook ./cmd/webhook/
+
+# ── Stage 2: Runtime ──────────────────────────────────────────────────────────
+FROM gcr.io/distroless/static:nonroot
+
+COPY --from=builder /dc-api-webhook /dc-api-webhook
+
+# Webhook listens on 9443 by default (DCWEBHOOK_LISTEN_ADDR).
+EXPOSE 9443
+
+ENTRYPOINT ["/dc-api-webhook"]

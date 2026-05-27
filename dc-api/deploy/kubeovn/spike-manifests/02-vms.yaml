@@ -1,0 +1,153 @@
+# Two KubeVirt VMs — one per subnet, attached via multus to KubeOVN.
+#
+# Image:  CirrOS via container disk (~12MB, boots in seconds, has ping/ssh).
+#         Default credentials: cirros / gocubsgo
+# Why CirrOS, not Ubuntu via Harvester VirtualMachineImage:
+#   - CirrOS ContainerDisk needs zero Harvester image setup; works on any
+#     KubeVirt cluster. Reduces variables in the spike.
+#   - Once the spike is green and we move to DC-API's kubeovn driver, real
+#     VMs go through DC-API's existing image flow (Harvester VMI). The
+#     overlay attachment pattern is identical.
+#
+# Both VMs are scheduled on different nodes via nodeAffinity to enable the
+# live-migration verification step (verify gate #3).
+#
+# ── KubeOVN MAC PINNING (critical, see m2-network-api-mapping.md) ──────────
+# OVN port-security drops frames whose source MAC isn't on the LSP's allow
+# list. KubeVirt's `bridge: {}` mode assigns a random MAC to the VM's virtio
+# NIC, which doesn't match the MAC kube-ovn registered on the LSP, so the VM
+# is silently filtered out. Fix: pin the same explicit MAC on BOTH:
+#   - kube-ovn:    annotation `<nad>.<ns>.kubernetes.io/mac_address`
+#   - KubeVirt:    `interfaces[].macAddress`
+# This makes kube-ovn use the pinned MAC for the LSP allow list, and KubeVirt
+# write that MAC into the libvirt domain XML so the VM's virtio uses it.
+# Locally-administered MACs (`02:` prefix) chosen for readability.
+---
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: spike-vm-a1
+  namespace: kubeovn-spike
+  labels:
+    purpose: m2-networking-spike
+spec:
+  running: true
+  template:
+    metadata:
+      labels:
+        kubevirt.io/vm: spike-vm-a1
+      annotations:
+        # Tell KubeOVN's IPAM which subnet to allocate from for this multus interface.
+        spike-nad-a1.kubeovn-spike.kubernetes.io/logical_switch: spike-subnet-a1
+        # Pin the MAC kube-ovn registers on the OVN logical switch port. Must match
+        # interfaces[].macAddress below or OVN port-security drops the VM's frames.
+        # Try two annotation formats — kube-ovn's output uses `.ovn.kubernetes.io/`
+        # (with `.ovn.`) so the input likely uses the same format. Keeping both for now.
+        spike-nad-a1.kubeovn-spike.ovn.kubernetes.io/mac_address: "02:aa:bb:cc:dd:01"
+        spike-nad-a1.kubeovn-spike.kubernetes.io/mac_address: "02:aa:bb:cc:dd:01"
+    spec:
+      domain:
+        cpu:
+          cores: 1
+          # lk-dev nodes are heterogeneous (node01=Skylake, node02=IvyBridge).
+          # Pin to highest common denominator so VM is live-migratable between them.
+          # Production: ensure homogeneous CPUs in the Harvester cluster.
+          model: IvyBridge
+        memory: { guest: 256Mi }
+        devices:
+          disks:
+            - name: containerdisk
+              disk: { bus: virtio }
+            - name: cloudinit
+              disk: { bus: virtio }
+          interfaces:
+            - name: ovn
+              bridge: {}
+              macAddress: "02:aa:bb:cc:dd:01"   # must match the kube-ovn annotation above
+      networks:
+        - name: ovn
+          multus:
+            networkName: kubeovn-spike/spike-nad-a1
+            default: true       # primary network for the VM (no pod network)
+      # `preferred` (not required) so initial placement targets node01 but
+      # KubeVirt can still schedule the migration target pod on node02.
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - harvester-dev-lk-dc-node01-10-15
+      volumes:
+        - name: containerdisk
+          containerDisk:
+            image: quay.io/kubevirt/cirros-container-disk-demo:latest
+        - name: cloudinit
+          cloudInitNoCloud:
+            userData: |
+              #!/bin/sh
+              echo 'spike-vm-a1 ready' > /etc/motd
+---
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: spike-vm-a2
+  namespace: kubeovn-spike
+  labels:
+    purpose: m2-networking-spike
+spec:
+  running: true
+  template:
+    metadata:
+      labels:
+        kubevirt.io/vm: spike-vm-a2
+      annotations:
+        spike-nad-a2.kubeovn-spike.kubernetes.io/logical_switch: spike-subnet-a2
+        spike-nad-a2.kubeovn-spike.ovn.kubernetes.io/mac_address: "02:aa:bb:cc:dd:02"
+        spike-nad-a2.kubeovn-spike.kubernetes.io/mac_address: "02:aa:bb:cc:dd:02"
+    spec:
+      domain:
+        cpu:
+          cores: 1
+          # lk-dev nodes are heterogeneous (node01=Skylake, node02=IvyBridge).
+          # Pin to highest common denominator so VM is live-migratable between them.
+          # Production: ensure homogeneous CPUs in the Harvester cluster.
+          model: IvyBridge
+        memory: { guest: 256Mi }
+        devices:
+          disks:
+            - name: containerdisk
+              disk: { bus: virtio }
+            - name: cloudinit
+              disk: { bus: virtio }
+          interfaces:
+            - name: ovn
+              bridge: {}
+              macAddress: "02:aa:bb:cc:dd:02"   # must match the kube-ovn annotation above
+      networks:
+        - name: ovn
+          multus:
+            networkName: kubeovn-spike/spike-nad-a2
+            default: true
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - harvester-dev-lk-dc-node02-10-17
+      volumes:
+        - name: containerdisk
+          containerDisk:
+            image: quay.io/kubevirt/cirros-container-disk-demo:latest
+        - name: cloudinit
+          cloudInitNoCloud:
+            userData: |
+              #!/bin/sh
+              echo 'spike-vm-a2 ready' > /etc/motd

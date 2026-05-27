@@ -1,0 +1,73 @@
+# PostgreSQL StatefulSet for lk-dev.
+# For production you'd use a managed PostgreSQL or CloudNativePG operator,
+# but for lk-dev a single StatefulSet with a PVC is perfectly fine.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dc-postgres
+  namespace: dc-system
+spec:
+  selector:
+    app: dc-postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+  clusterIP: None   # headless service — StatefulSet pods get stable DNS names
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: dc-postgres
+  namespace: dc-system
+spec:
+  serviceName: dc-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dc-postgres
+  template:
+    metadata:
+      labels:
+        app: dc-postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          env:
+            - name: POSTGRES_USER
+              value: dc_api
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: dc-postgres-secret
+                  key: password
+            - name: POSTGRES_DB
+              value: dc_api
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - containerPort: 5432
+          volumeMounts:
+            - name: pgdata
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "dc_api"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+  volumeClaimTemplates:
+    - metadata:
+        name: pgdata
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi
+        storageClassName: harvester
+---
+# Separate secret for postgres password so DC-API's secret only needs the full DSN.
+# kubectl create secret generic dc-postgres-secret \
+#   --from-literal=password=changeme \
+#   --namespace dc-system
+# (replace "changeme" with a real password)

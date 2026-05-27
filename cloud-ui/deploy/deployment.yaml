@@ -1,0 +1,73 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloud-ui
+  namespace: dc-system
+  labels:
+    app: cloud-ui
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cloud-ui
+  template:
+    metadata:
+      labels:
+        app: cloud-ui
+    spec:
+      # nginx-unprivileged runs as uid 101 (nginx group).
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        runAsGroup: 101
+      imagePullSecrets:
+        - name: ghcr-pull-secret
+      containers:
+        - name: cloud-ui
+          image: ghcr.io/hiranadikari/cloud-ui:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            # nginx-unprivileged writes pid and cache files under /tmp
+            # and /var/cache/nginx — both are tmpfs mounts so the rest of
+            # the root filesystem can be read-only. Configured via the
+            # volumeMounts below.
+            readOnlyRootFilesystem: true
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          volumeMounts:
+            # nginx-unprivileged needs writable /tmp and two nginx cache dirs.
+            - name: tmp
+              mountPath: /tmp
+            - name: nginx-cache
+              mountPath: /var/cache/nginx
+            - name: nginx-run
+              mountPath: /var/run
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: nginx-cache
+          emptyDir: {}
+        - name: nginx-run
+          emptyDir: {}

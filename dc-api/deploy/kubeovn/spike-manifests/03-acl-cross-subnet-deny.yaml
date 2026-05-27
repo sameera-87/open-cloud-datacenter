@@ -1,0 +1,34 @@
+# Apply this AFTER verifying cross-subnet ping works. It adds a default-deny
+# ACL on spike-subnet-a1 blocking egress to spike-subnet-a2's CIDR.
+#
+# Verification flow:
+#   1. With manifests 00-02 applied: a1 ↔ a2 ping should succeed (intra-VPC
+#      logical router routes between subnets by default).
+#   2. Apply this file. Re-test: a1 → a2 ping should be blocked.
+#   3. Delete this file's ACL block (kubectl edit or revert with kubectl apply
+#      of the prior 01-subnets-and-nads.yaml). Re-test: ping works again.
+#
+# Why this matters: proves we can enforce *per-subnet* fine-grained policy.
+# DC-API's POST /v1/security-groups will construct exactly this shape,
+# scoped to the tenant's subnet.
+---
+apiVersion: kubeovn.io/v1
+kind: Subnet
+metadata:
+  name: spike-subnet-a1
+spec:
+  vpc: spike-vpc-a
+  protocol: IPv4
+  provider: spike-nad-a1.kubeovn-spike.ovn
+  cidrBlock: 10.99.1.0/24
+  gateway: 10.99.1.1
+  excludeIps:
+    - 10.99.1.1
+  namespaces:
+    - kubeovn-spike
+  private: false
+  acls:
+    - direction: to-lport
+      priority: 1000
+      match: 'ip4.dst == 10.99.2.0/24'
+      action: drop

@@ -1,0 +1,106 @@
+# Upstream KubeOVN Helm values — M2 networking spike.
+#
+# Mode:    Multus secondary CNI (Canal stays primary).
+# Target:  Harvester cluster (lk-dev), v1.7.1, RKE2 v1.34.3.
+# Chart:   kubeovn/kube-ovn  (https://kubeovn.github.io/kube-ovn)
+# Pinned:  v1.15.x  — keep in sync with spike-install.sh KUBEOVN_VERSION.
+#
+# These values are a starting point for the spike. Anything marked "VERIFY"
+# below is a working assumption that the spike must confirm against the live
+# cluster. Do not promote this file to a production Terraform module before
+# every "VERIFY" line has been validated.
+
+# ── Image ────────────────────────────────────────────────────────────────────
+image:
+  registry: docker.io
+  repository: kubeovn/kube-ovn
+  tag: v1.15.4         # matches Harvester's bundled KubeOVN version (parity for easy migration to Model A later)
+  pullPolicy: IfNotPresent
+
+# ── Component replicas ───────────────────────────────────────────────────────
+# We have ONE control-plane node (single etcd). ovn-central HA needs 3+ nodes
+# anyway — running 1 replica is the only correct option here.
+replicaCount: 1
+
+# Pin OVN central to control-plane nodes.
+# The chart expects key=value format (exact-match), not a label-existence selector.
+# RKE2 sets `node-role.kubernetes.io/control-plane=true` (with value "true",
+# unlike kubeadm which uses an empty value). Verified against harvester-dev:
+#   kubectl get node ... -o jsonpath='{.metadata.labels}' → control-plane='true'
+MASTER_NODES_LABEL: "node-role.kubernetes.io/control-plane=true"
+
+# MASTER_NODES is fed verbatim into the ovn-central NODE_IPS env var, which
+# is then compared against the pod's host IP at startup. It MUST be a
+# comma-separated list of *IP addresses*, not hostnames. Hard-coded for the
+# spike to node01's mgmt IP — the production Terraform module will derive
+# this from the cluster's node list.
+MASTER_NODES: "192.168.10.15"
+
+# ── CNI integration with Multus ──────────────────────────────────────────────
+# RKE2 paths — these differ from vanilla k8s.
+cni_conf:
+  CNI_CONF_DIR: "/var/lib/rancher/rke2/agent/etc/cni/net.d"
+  CNI_BIN_DIR: "/opt/cni/bin"
+  MOUNT_LOCAL_BIN_DIR: "true"
+  # Use a high-numbered conf name so Canal stays the cluster default.
+  # Canal ships as 10-canal.conflist; KubeOVN at 90 means Multus picks Canal
+  # first for cluster-level pods. KubeOVN is referenced explicitly via NADs.
+  CNI_CONFIG_PRIORITY: "90"
+
+# ── Networking ───────────────────────────────────────────────────────────────
+networking:
+  # Geneve overlay tunnels. Default and recommended.
+  NET_STACK: ipv4
+  NETWORK_TYPE: geneve
+  TUNNEL_TYPE: geneve
+
+  # VERIFY: tunnel interface. Discovery showed `eno2np1` is bound to the
+  # Harvester VM-network VLAN bridge — DO NOT use it. The mgmt 192.168.10.x
+  # interface is what we want (likely `eno1` but confirm at install time).
+  # spike-install.sh detects this dynamically and sets IFACE; this default
+  # is only a fallback.
+  IFACE: ""            # auto-detected by spike-install.sh
+
+  # KubeOVN's own pod subnet — irrelevant in secondary-CNI mode (Canal handles
+  # cluster pods) but the chart requires a value. Picked to NOT overlap with
+  # the cluster's actual pod CIDR (10.52.0.0/16) or service CIDR (10.53.0.0/16).
+  POD_CIDR: "100.65.0.0/16"
+  POD_GATEWAY: "100.65.0.1"
+  SVC_CIDR: "10.53.0.0/16"          # must match the Kubernetes service CIDR
+  JOIN_CIDR: "100.64.0.0/16"        # KubeOVN's internal join network — default
+  EXCLUDE_IPS: ""
+
+  # No SSL between OVN components for the spike. Re-enable for prod.
+  ENABLE_SSL: "false"
+
+# ── Feature flags ────────────────────────────────────────────────────────────
+# Conservative for the spike. Turn things on only as the verification gates
+# require them.
+func:
+  ENABLE_LB: "false"            # avoid kube-vip clash (Harvester runs kube-vip for the API VIP)
+  ENABLE_LB_SVC: "false"
+  ENABLE_NP: "false"            # Canal handles cluster NetworkPolicy; KubeOVN ACLs are separate (subnet-level)
+  ENABLE_EIP_SNAT: "false"      # we test internal VPC connectivity only in the spike
+  ENABLE_EXTERNAL_VPC: "true"   # required for custom (tenant) VPCs
+  ENABLE_KEEP_VM_IP: "true"     # preserve VM IP across live migration (M2 hard requirement)
+  ENABLE_METRICS: "true"
+  ENABLE_BIND_LOCAL_IP: "true"
+
+# ── Performance / sizing ─────────────────────────────────────────────────────
+# Discovery showed comfortable headroom on both nodes. These are the chart
+# defaults — leaving explicit so we can tune in production later.
+resources:
+  ovnCentral:
+    requests: { cpu: 300m, memory: 200Mi }
+    limits:   { cpu: 3,    memory: 4Gi }
+  kubeOvnController:
+    requests: { cpu: 200m, memory: 200Mi }
+    limits:   { cpu: 1,    memory: 1Gi }
+  kubeOvnCni:
+    requests: { cpu: 100m, memory: 100Mi }
+    limits:   { cpu: 1,    memory: 1Gi }
+
+# ── Probes ───────────────────────────────────────────────────────────────────
+# Defaults are fine for the spike. Documented here so we know where to tune
+# if the install times out on slow Harvester nodes.
+# (chart-default liveness/readiness probes apply)

@@ -1,0 +1,23 @@
+# LoadBalancer service that gives the nginx ingress controller a Harvester LB IP.
+# Apply this to the DCAPI-CONTROLPLANE-RKE2 cluster (one-time, not rolling deploy):
+#   kubectl --context dcapi-controlplane-rke2 apply -f ingress-lb.yaml
+#
+# After applying, the Harvester cloud provider will create a LB resource and assign
+# 192.168.10.37 from the dcapi-controlplane-lb IPPool.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ingress-expose
+  namespace: kube-system
+spec:
+  type: LoadBalancer
+  selector:
+    app.kubernetes.io/name: rke2-ingress-nginx
+    app.kubernetes.io/component: controller
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+    - name: https
+      port: 443
+      targetPort: 443

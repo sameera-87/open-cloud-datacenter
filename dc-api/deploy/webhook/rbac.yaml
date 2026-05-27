@@ -1,0 +1,33 @@
+---
+# ServiceAccount the webhook pod runs as.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dc-api-webhook
+  namespace: dc-api
+---
+# ClusterRole: the webhook only needs read access to NetworkAttachmentDefinitions
+# (to resolve the CNI type) and VirtualMachines (admission, not direct read).
+# NADs are namespaced so we use a ClusterRole + ClusterRoleBinding to reach
+# all tenant namespaces (dc-<tenantID>) without enumerating them at deploy time.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dc-api-webhook
+rules:
+  - apiGroups: ["k8s.cni.cncf.io"]
+    resources: ["network-attachment-definitions"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dc-api-webhook
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: dc-api-webhook
+subjects:
+  - kind: ServiceAccount
+    name: dc-api-webhook
+    namespace: dc-api

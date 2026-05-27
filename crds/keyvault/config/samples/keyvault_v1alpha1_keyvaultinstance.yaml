@@ -1,0 +1,12 @@
+apiVersion: keyvault.opencloud.wso2.com/v1alpha1
+kind: KeyVaultInstance
+metadata:
+  labels:
+    app.kubernetes.io/name: keyvault
+    app.kubernetes.io/managed-by: kustomize
+  name: keyvaultinstance-sample
+spec:
+  backendRef:
+    name: kvb-sample
+    namespace: dc-tenant-sample
+  softDeleteDays: 30

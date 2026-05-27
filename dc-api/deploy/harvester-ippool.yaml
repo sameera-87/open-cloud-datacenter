@@ -1,0 +1,19 @@
+# Harvester LB IP pool for the DC-API control plane cluster.
+# Apply this to the HARVESTER-DEV cluster (not the dcapi-controlplane-rke2 cluster):
+#   kubectl --context harvester-dev apply -f harvester-ippool.yaml
+#
+# This will eventually live in the wso2-datacenter-project bootstrap Terraform layer.
+apiVersion: loadbalancer.harvesterhci.io/v1beta1
+kind: IPPool
+metadata:
+  name: dcapi-controlplane-lb
+spec:
+  ranges:
+    - subnet: 192.168.10.0/24
+      rangeStart: 192.168.10.37
+      rangeEnd: 192.168.10.37
+      gateway: 192.168.10.254
+  selector:
+    scope:
+      - namespace: dc-api
+        project: c-qzbxw/p-m8kmj
