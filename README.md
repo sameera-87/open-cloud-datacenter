@@ -16,8 +16,9 @@
 | Operator | Directory | Status | API group |
 |---|---|---|---|
 | Key Vault | [`keyvault/`](./keyvault/) | v0.0.x | `keyvault.opencloud.wso2.com` |
+| Database | [`database/`](./database/) | v0.0.x | `dbaas.opencloud.wso2.com` |
 
-Future operators (DBaaS, Registry, etc.) will land alongside.
+Future operators (Registry, etc.) will land alongside.
 
 ## Layout convention
 
