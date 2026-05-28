@@ -29,6 +29,7 @@ import (
 	"github.com/wso2/dc-api/internal/db"
 	"github.com/wso2/dc-api/internal/providers"
 	"github.com/wso2/dc-api/internal/providers/common"
+	"github.com/wso2/dc-api/internal/providers/dbaas"
 	"github.com/wso2/dc-api/internal/providers/endpoints"
 	"github.com/wso2/dc-api/internal/providers/harvester"
 	"github.com/wso2/dc-api/internal/providers/kubeovn"
@@ -326,6 +327,7 @@ func main() {
 	var nsProvisioner providers.ProjectNamespaceProvisioner
 	var tenantNSProvisioner providers.TenantNamespaceProvisioner
 	var kviProvisioner providers.KVIProvisioner
+	var dbaasProvisioner providers.DatabaseProvisioner
 	if kvClient, ok := networkProvider.(*kubeovn.Client); ok {
 		endpointProvisioner = endpoints.NewKubeOVNProvisioner(kvClient.Dynamic(), endpoints.KubeOVNProvisionerOptions{
 			DNSForwarders: cfg.ParseDNSForwarders(),
@@ -336,6 +338,10 @@ func main() {
 		// REST config — same K8s API server, no point in two connection pools.
 		// The REST config is needed for the OpenBao pod-proxy path (secret CRUD).
 		kviProvisioner = kvi.NewClient(kvClient.Dynamic(), kvClient.RESTConfig())
+		// Task 1 — DBaaS adapter. Only needs the dynamic client; doesn't
+		// talk to the dbaas REST gateway, only the DBInstance CRD. Pre-req:
+		// dbaas controller + CRD installed on the same K8s API server.
+		dbaasProvisioner = dbaas.NewClient(kvClient.Dynamic())
 	}
 
 	// ── Router ────────────────────────────────────────────────────────────────
@@ -351,6 +357,8 @@ func main() {
 		NSProvisioner:       nsProvisioner,
 		TenantNSProvisioner: tenantNSProvisioner,
 		KVIProvisioner:      kviProvisioner,
+		DatabaseProvisioner: dbaasProvisioner,
+		DBaaSOSImage:        cfg.DBaaSOSImage,
 		BastionImage:        cfg.BastionImage,
 		BastionMgmtNAD:      cfg.BastionMgmtNAD,
 		InfraReservedNADs:   reservedNADs,

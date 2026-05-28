@@ -99,6 +99,23 @@ func (m *Mutator) buildPatch(ctx context.Context, vm map[string]interface{}) ([]
 		return nil, nil
 	}
 
+	// If the VM declares a `pod` network, that NIC is meant to be the launcher
+	// pod's primary interface (eth0) — e.g. the dbaas DB VM's mgmt-net
+	// masquerade, which the dbaas controller reaches over the cluster pod
+	// network to probe Postgres readiness. In that case we must NOT force
+	// v1.multus-cni.io/default-network onto the OVN NAD: doing so steals eth0
+	// and strands the VM on the isolated tenant VPC, unreachable from its
+	// controller. MAC + logical_switch pinning for the OVN data NIC still
+	// apply. dc-api's own compute VMs are pure-multus (no pod network), so
+	// they are unaffected and still get default-network set.
+	hasPodNetwork := false
+	for _, net := range networks {
+		if _, ok := net["pod"]; ok {
+			hasPodNetwork = true
+			break
+		}
+	}
+
 	// Build a map from interface name → MAC so we can look up the MAC once we
 	// know which interfaces correspond to OVN NADs.
 	ifaceMAC := make(map[string]string, len(interfaces))
@@ -168,10 +185,14 @@ func (m *Mutator) buildPatch(ctx context.Context, vm map[string]interface{}) ([]
 
 		// Idempotency: if all three annotation values already match the interface
 		// MAC (and the default-network annotation is set), skip this interface.
+		// When the VM has a pod network, default-network is deliberately left
+		// alone (see hasPodNetwork above), so it must not factor into the
+		// idempotency check.
+		defaultNetworkOK := hasPodNetwork || existingAnnotations[keyDefault] == nadNS+"/"+nadName
 		if existingAnnotations[keyOVN] == mac &&
 			existingAnnotations[keyLegacy] == mac &&
 			existingAnnotations[keySwitch] == nadName &&
-			existingAnnotations[keyDefault] == nadNS+"/"+nadName {
+			defaultNetworkOK {
 			m.log.Debug().Str("iface", ifaceName).Msg("webhook: OVN annotations already correct — no-op")
 			continue
 		}
@@ -192,14 +213,18 @@ func (m *Mutator) buildPatch(ctx context.Context, vm map[string]interface{}) ([]
 		ops = append(ops, annotationOp(existingAnnotations, keyOVN, mac)...)
 		ops = append(ops, annotationOp(existingAnnotations, keyLegacy, mac)...)
 		ops = append(ops, annotationOp(existingAnnotations, keySwitch, nadName)...)
-		ops = append(ops, annotationOp(existingAnnotations, keyDefault, nadNS+"/"+nadName)...)
+		if !hasPodNetwork {
+			ops = append(ops, annotationOp(existingAnnotations, keyDefault, nadNS+"/"+nadName)...)
+		}
 
 		// Update the local map so subsequent iterations see the new values (for
 		// multiple OVN interfaces — rare but safe to handle).
 		existingAnnotations[keyOVN] = mac
 		existingAnnotations[keyLegacy] = mac
 		existingAnnotations[keySwitch] = nadName
-		existingAnnotations[keyDefault] = nadNS + "/" + nadName
+		if !hasPodNetwork {
+			existingAnnotations[keyDefault] = nadNS + "/" + nadName
+		}
 	}
 
 	return ops, nil

@@ -622,3 +622,110 @@ type VPCNATProvisioner interface {
 	WaitVpcNATPodsGone(ctx context.Context, vpcUID string, timeout time.Duration) error
 }
 
+// DatabaseProvisioner is the optional interface that drives the dbaas
+// operator's DBInstance CRD. dc-api creates / reads / deletes CRs of group
+// dbaas.opencloud.wso2.com/v1alpha1 (kind: DBInstance) and reads the
+// credentials Secret the controller writes. The dbaas controller (separate
+// workload at github.com/wso2/open-cloud-datacenter) watches the CRs and
+// provisions the underlying KubeVirt VM running PostgreSQL.
+//
+// Task 1 (D2): 1:1 model — one Database == one DBInstance CR == one VM.
+// No DatabaseBackend (unlike KVIProvisioner). The interface is therefore
+// strictly smaller than KVIProvisioner.
+//
+// dc-api handlers depend on this interface — never on the concrete dbaas
+// adapter — so the same handler code works against a fake in tests.
+type DatabaseProvisioner interface {
+	// CreateDatabaseInstance creates a DBInstance CR in the project
+	// namespace with the seven standard dc-api.wso2.com/* labels stamped
+	// on it. Returns an AlreadyExists error if a CR of the same name
+	// exists (handler maps to 409).
+	CreateDatabaseInstance(ctx context.Context, req DatabaseInstanceCreateRequest) error
+
+	// GetDatabaseInstance returns the CR's status, or (nil, nil) when the
+	// CR does not exist (handler treats that as "not yet provisioned" —
+	// no error).
+	GetDatabaseInstance(ctx context.Context, namespace, name string) (*DatabaseInstanceStatus, error)
+
+	// DeleteDatabaseInstance removes the DBInstance CR. The dbaas
+	// controller's finalizer runs the upstream teardown (VM, DataVolumes,
+	// Service, ServiceMonitor, Secret); dc-api just deletes the CR.
+	// Idempotent: NotFound is treated as success.
+	DeleteDatabaseInstance(ctx context.Context, namespace, name string) error
+
+	// GetDatabaseCredentialsSecret returns the raw data map of the credentials
+	// Secret the controller wrote. Returns (nil, nil) when the Secret
+	// does not exist. Keys are dbaas-specific (admin_user, admin_password,
+	// ca_cert, server_cert, ...); the handler picks the subset to surface
+	// on GET .../credentials.
+	GetDatabaseCredentialsSecret(ctx context.Context, namespace, name string) (map[string][]byte, error)
+}
+
+// DatabaseInstanceCreateRequest is what the handler hands the provisioner.
+// The provisioner translates it into the DBInstance CR's metadata + spec.
+// Field naming mirrors the dbaas controller's CRD (api/v1alpha1/
+// dbinstance_types.go) so the adapter's translation is mechanical.
+type DatabaseInstanceCreateRequest struct {
+	// Name is the CR's metadata.name (e.g. "db-<8-char-uuid>"). Built by
+	// the handler via common.NamespaceScopedName("db", dbID).
+	Name string
+	// Namespace is the project-tier namespace ("dc-<tenant>-<project>").
+	Namespace string
+	// Labels is the result of common.StandardLabels(...) — the seven
+	// dc-api.wso2.com/* labels the operator must propagate to children
+	// per docs/managed-services-integration.md §6.
+	Labels map[string]string
+
+	// InstanceClass maps to spec.dbInstanceClass (e.g. "db.t3.medium").
+	// Validated by the handler against models.DatabaseInstanceClasses.
+	InstanceClass string
+	// AllocatedStorageGB maps to spec.allocatedStorage.
+	AllocatedStorageGB int
+	// EngineVersion is informational in v1 (the dbaas controller doesn't
+	// act on it). Stored in the CR spec for future-compat (Task 2).
+	EngineVersion string
+
+	// OSImage is the Harvester VirtualMachineImage ("namespace/name") the
+	// controller boots the VM from (spec.osImage). Operator-configured via
+	// DCAPI_DBAAS_OS_IMAGE; empty leaves the controller's own default.
+	OSImage string
+
+	// NetworkRef is the resolved Multus NAD identity the controller
+	// attaches the VM's data NIC to. The handler resolves it from either
+	// VPC mode (subnet → NAD) or legacy mode (pass-through), so the
+	// adapter never sees raw vnet/subnet/nad_ref fields.
+	NetworkRef DatabaseNetworkRef
+}
+
+// DatabaseNetworkRef is the namespace/name pair identifying the Multus NAD
+// the operator attaches the database VM to. Per
+// docs/managed-services-integration.md §7.1 the operator does not see how
+// the NAD was produced — only its identity.
+type DatabaseNetworkRef struct {
+	Namespace string
+	Name      string
+	// DNSServerIP is the per-VPC CoreDNS address for VPC-mode subnets, passed
+	// to the operator so the VM's dnsConfig points at a resolver reachable
+	// from the isolated VPC (defeats the KubeVirt-on-OVN DHCP DNS race that
+	// otherwise breaks apt during cloud-init). Empty for legacy bridge NADs
+	// (cluster-routable VLAN DNS works without it).
+	DNSServerIP string
+}
+
+// DatabaseInstanceStatus is the framework-friendly view of a DBInstance.status.
+// Mirrors the contract's five-phase enum so handlers don't have to grub
+// through the unstructured CR themselves. The adapter is responsible for
+// mapping the dbaas-specific status shape (RDS-style status.phase values
+// like "available", and the credential Secret at status.masterUserSecret.name
+// rather than the canonical status.endpoint.secretRef.name) into this
+// canonical view.
+type DatabaseInstanceStatus struct {
+	Phase   string // Pending|Provisioning|Ready|Failed|Terminating
+	Message string
+
+	EndpointAddress string
+	EndpointPort    int
+
+	SecretRefName string // empty until Ready
+}
+

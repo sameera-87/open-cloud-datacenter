@@ -148,7 +148,9 @@ func (c *Client) ensureVpcCorefileConfigMap(ctx context.Context, vpcUID string) 
 	forwarders := strings.Join(c.dnsForwarders(), " ")
 	corefile := fmt.Sprintf(`.:53 {
     errors
-    health { lameduck 5s }
+    health {
+        lameduck 5s
+    }
     ready
     forward . %s { max_concurrent 1000 }
     cache 300

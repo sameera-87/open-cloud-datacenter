@@ -69,6 +69,14 @@ type RouterDeps struct {
 	// KeyVaultInstance). Nil means dc-api falls back to the chunk-1+2
 	// behaviour (logical CRUD only; no backing OpenBao integration).
 	KVIProvisioner providers.KVIProvisioner
+	// DatabaseProvisioner drives the dbaas operator's DBInstance CRD
+	// (Task 1). Nil means dc-api falls back to DB-only synchronous CRUD —
+	// tests + no-K8s deployments.
+	DatabaseProvisioner providers.DatabaseProvisioner
+	// DBaaSOSImage is the operator-configured Harvester VM image
+	// ("namespace/name") database VMs boot from (DCAPI_DBAAS_OS_IMAGE).
+	// Empty defers to the controller's own default.
+	DBaaSOSImage string
 	// EndpointProvisioner is the generic Private Endpoint provisioner used by
 	// every M3 managed service (Key Vault today; Postgres / Valkey / Harbor
 	// later). Nil disables /v1/<service>/{id}/private-endpoints routes.
@@ -414,6 +422,16 @@ func NewRouter(deps RouterDeps) http.Handler {
 								r.Delete("/{ep_id}", kvEpHandler.Delete)
 							})
 						}
+					})
+
+					// ── Task 1 — DBaaS Databases ────────────────────────────
+					dbHandler := handlers.NewDatabaseHandler(deps.Repo, deps.DatabaseProvisioner, deps.DBaaSOSImage, deps.Log)
+					r.Route("/databases", func(r chi.Router) {
+						r.Post("/", dbHandler.Create)                     // POST   .../databases
+						r.Get("/", dbHandler.List)                        // GET    .../databases
+						r.Get("/{id}", dbHandler.Get)                     // GET    .../databases/{id}
+						r.Delete("/{id}", dbHandler.Delete)               // DELETE .../databases/{id}
+						r.Get("/{id}/credentials", dbHandler.Credentials) // GET    .../databases/{id}/credentials (shown-once)
 					})
 				})
 			})

@@ -129,6 +129,13 @@ type Config struct {
 	// from workstations via VPN.
 	BastionMgmtNAD string `envconfig:"BASTION_MGMT_NAD" default:"iaas/vm-network-001"`
 
+	// ── Task 1 DBaaS ─────────────────────────────────────────────────────────
+	// DBaaSOSImage is the Harvester VirtualMachineImage (`namespace/resource-name`)
+	// the dbaas controller boots database VMs from. dc-api stamps this into every
+	// DBInstance CR's spec.osImage. Empty leaves the controller's own default,
+	// which may not match a given cluster's image catalog. Set per-environment.
+	DBaaSOSImage string `envconfig:"DBAAS_OS_IMAGE" default:"rancher-infra/ubuntu-22-04"`
+
 	// ── F21 infra-reserved NADs ─────────────────────────────────────────────
 	// Comma-separated list of `namespace/nad-name` references that tenant
 	// VMs MUST NOT attach to (the legacy `network_name` path). These are

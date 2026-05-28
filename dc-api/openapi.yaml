@@ -94,6 +94,13 @@ tags:
       Chunk 3 adds the human-driven secret CRUD data plane
       (`/keyvaults/{id}/secrets`), proxied through dc-api to the per-tenant
       OpenBao KV-v2 mount — callers never see OpenBao tokens.
+  - name: databases
+    description: |
+      Managed PostgreSQL databases (DBaaS). Each Database is a project-scoped
+      KubeVirt VM provisioned by the dbaas controller. Task 1 v1: Postgres
+      only, 1:1 model (one Database = one VM), shown-once credentials via
+      `GET .../credentials`. Network can be on a KubeOVN VPC subnet or a
+      legacy Multus bridge NAD — selectable per-instance.
   - name: auth
     description: |
       Backend-for-Frontend OIDC session endpoints used by cloud-ui. Not consumed by dcctl.
@@ -3980,6 +3987,201 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  # ── Task 1 — DBaaS Databases ───────────────────────────────────────────────
+  /v1/tenants/{tenant_id}/projects/{project_id}/databases:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+      - $ref: "#/components/parameters/ProjectID"
+
+    post:
+      operationId: createDatabase
+      tags: [databases]
+      summary: Create a managed Database (async)
+      description: |
+        Creates a managed PostgreSQL Database. dc-api inserts a `PENDING` row,
+        then creates a `DBInstance` CR in the project namespace; the dbaas
+        controller provisions the VM asynchronously. Caller polls
+        `GET .../{id}` until `status` is `ACTIVE`, then retrieves the master
+        credentials exactly once via `GET .../{id}/credentials`.
+
+        **Network selection** is optional. When omitted, dc-api picks the
+        project's first ACTIVE subnet (VPC mode). Specify a `network` block
+        to pick a different subnet (VPC mode) or attach to a pre-existing
+        Multus NAD (legacy mode — for VLAN-based deployments).
+
+        **Required role**: `member` or `owner`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateDatabaseRequest"
+            example:
+              name: orders
+              engine: postgres
+              instance_class: db.t3.medium
+              allocated_storage_gb: 50
+      responses:
+        "201":
+          description: Database created (provisioning in progress)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Database"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    get:
+      operationId: listDatabases
+      tags: [databases]
+      summary: List Databases in this project
+      description: |
+        Returns every Database in the (tenant, project) scope. Each row's
+        `status` / `message` / `endpoint_address` / `endpoint_port` reflect
+        the live `DBInstance` CR status, not just the DB-row snapshot.
+      responses:
+        "200":
+          description: List of Databases
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Database"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/tenants/{tenant_id}/projects/{project_id}/databases/{id}:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+      - $ref: "#/components/parameters/ProjectID"
+      - name: id
+        in: path
+        required: true
+        description: UUID of the Database
+        schema:
+          type: string
+          format: uuid
+          example: 6f1c4d2a-0000-0000-0000-000000000071
+
+    get:
+      operationId: getDatabase
+      tags: [databases]
+      summary: Get a Database by UUID
+      description: |
+        Returns the DB row with live `DBInstance` CR status overlaid
+        (`status`, `message`, `endpoint_address`, `endpoint_port`).
+      responses:
+        "200":
+          description: Database resource
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Database"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    delete:
+      operationId: deleteDatabase
+      tags: [databases]
+      summary: Delete a Database
+      description: |
+        Issues `DELETE` on the `DBInstance` CR (the controller's finalizer
+        tears down the VM, DataVolumes, Service, and credentials Secret
+        asynchronously) and drops the dc-api row immediately. Subsequent
+        `GET` returns 404.
+
+        **Required role**: `member` or `owner`.
+      responses:
+        "204":
+          description: Database deletion accepted
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/tenants/{tenant_id}/projects/{project_id}/databases/{id}/credentials:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+      - $ref: "#/components/parameters/ProjectID"
+      - name: id
+        in: path
+        required: true
+        description: UUID of the Database
+        schema:
+          type: string
+          format: uuid
+
+    get:
+      operationId: getDatabaseCredentials
+      tags: [databases]
+      summary: Retrieve the Database's master credentials (shown once)
+      description: |
+        Returns the master user credentials the dbaas controller provisioned.
+        **The response is shown exactly once** — subsequent calls return
+        `410 Gone`. The caller MUST store the response immediately; dc-api
+        never holds these values server-side after the first read.
+
+        Pre-conditions:
+          - The Database must have `status=ACTIVE` (controller finished
+            provisioning and PostgreSQL is accepting connections). Otherwise:
+            409 Conflict.
+          - The dbaas operator integration must be wired into this dc-api
+            deployment. Otherwise: 501 Not Implemented.
+
+        **Required role**: `member` or `owner`.
+      responses:
+        "200":
+          description: Database master credentials (shown once)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DatabaseCredentials"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Database not Ready yet — poll GET .../{id} until status=ACTIVE
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "410":
+          description: Credentials already retrieved once and cannot be retrieved again
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "501":
+          description: dbaas operator integration not enabled on this deployment
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
 # ── Components ─────────────────────────────────────────────────────────────────
 
 components:
@@ -6256,4 +6458,186 @@ components:
           type: string
           description: Human-readable polling instruction with the GET URL
           example: "VNet is being provisioned. Poll GET /v1/vnets/{id} for status."
+
+    # ── Task 1 — DBaaS Database schemas ───────────────────────────────────────
+
+    CreateDatabaseRequest:
+      type: object
+      required: [name, instance_class, allocated_storage_gb]
+      description: |
+        Body for `POST .../databases`. Network selection is optional —
+        omit to use the project's default (first ACTIVE subnet).
+      properties:
+        name:
+          type: string
+          description: Project-unique name (DNS-label rules; ≤32 chars).
+          example: orders
+        engine:
+          type: string
+          enum: [postgres]
+          default: postgres
+          description: Database engine. v1 supports postgres only.
+        engine_version:
+          type: string
+          description: |
+            Engine version (e.g. "16"). Informational in v1 — accepted and
+            stored but not acted on by the controller until Task 2 lands
+            multi-version support.
+          example: "16"
+        instance_class:
+          type: string
+          enum:
+            - db.t3.micro
+            - db.t3.small
+            - db.t3.medium
+            - db.t3.large
+            - db.t3.xlarge
+            - db.t3.2xlarge
+            - db.m5.large
+            - db.m5.xlarge
+            - db.m5.2xlarge
+            - db.r5.large
+            - db.r5.xlarge
+            - db.r5.2xlarge
+          description: RDS-style instance size class.
+          example: db.t3.medium
+        allocated_storage_gb:
+          type: integer
+          minimum: 1
+          description: Data-volume size in GiB.
+          example: 50
+        network:
+          $ref: "#/components/schemas/DatabaseNetworkSpec"
+
+    DatabaseNetworkSpec:
+      description: |
+        Discriminated network selection. Omit to auto-pick the project's
+        default subnet (VPC mode).
+      oneOf:
+        - $ref: "#/components/schemas/DatabaseNetworkVPC"
+        - $ref: "#/components/schemas/DatabaseNetworkLegacy"
+      discriminator:
+        propertyName: mode
+        mapping:
+          vpc: "#/components/schemas/DatabaseNetworkVPC"
+          legacy: "#/components/schemas/DatabaseNetworkLegacy"
+
+    DatabaseNetworkVPC:
+      type: object
+      required: [mode, vnet_id, subnet_id]
+      description: KubeOVN-managed VPC + subnet (the modern path).
+      properties:
+        mode:
+          type: string
+          enum: [vpc]
+        vnet_id:
+          type: string
+          format: uuid
+        subnet_id:
+          type: string
+          format: uuid
+
+    DatabaseNetworkLegacy:
+      type: object
+      required: [mode, nad_ref]
+      description: |
+        Pre-existing Multus NAD on a VLAN bridge. Used for environments
+        not yet migrated to KubeOVN (e.g. lk prod).
+      properties:
+        mode:
+          type: string
+          enum: [legacy]
+        nad_ref:
+          type: string
+          description: "Multus NAD as 'namespace/name'."
+          example: "default/vm-net-100"
+
+    Database:
+      type: object
+      description: |
+        A managed Database resource. Spec fields come from create-time
+        input; status fields (`status`, `message`, `endpoint_address`,
+        `endpoint_port`) are populated from the live DBInstance CR status
+        on every GET.
+      required:
+        - id
+        - tenant_id
+        - project_id
+        - name
+        - engine
+        - instance_class
+        - allocated_storage_gb
+        - network_mode
+        - status
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+        project_id:
+          type: string
+        name:
+          type: string
+        engine:
+          type: string
+          enum: [postgres]
+        engine_version:
+          type: string
+        instance_class:
+          type: string
+        allocated_storage_gb:
+          type: integer
+        network_mode:
+          type: string
+          enum: [vpc, legacy]
+        vnet_id:
+          type: string
+          format: uuid
+          description: Set only when network_mode=vpc.
+        subnet_id:
+          type: string
+          format: uuid
+          description: Set only when network_mode=vpc.
+        nad_ref:
+          type: string
+          description: Set only when network_mode=legacy.
+        status:
+          type: string
+          enum: [PENDING, ACTIVE, FAILED, DELETING]
+        message:
+          type: string
+          description: Human-readable status message from the controller.
+        endpoint_address:
+          type: string
+          description: IP or hostname clients connect to. Empty until ACTIVE.
+        endpoint_port:
+          type: integer
+          description: TCP port. Empty until ACTIVE.
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    DatabaseCredentials:
+      type: object
+      description: |
+        Master user credentials for a Database. Returned exactly once on
+        the first call to `GET .../{id}/credentials`. Save them immediately;
+        dc-api will never return them again.
+      required: [username, password]
+      properties:
+        username:
+          type: string
+        password:
+          type: string
+        ca_cert:
+          type: string
+          description: |
+            PEM-encoded CA certificate for SSL verification. Use with
+            `sslmode=verify-ca` in psql/JDBC connection strings.
 

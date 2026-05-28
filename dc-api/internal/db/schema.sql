@@ -794,3 +794,80 @@ DROP TRIGGER IF EXISTS cluster_node_pools_updated_at ON cluster_node_pools;
 CREATE TRIGGER cluster_node_pools_updated_at
     BEFORE UPDATE ON cluster_node_pools
     FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
+
+-- ─────────────────────────── Task 1 — DBaaS (Databases) ─────────────────────
+-- One row per managed Database. 1:1 model — each row maps to exactly one
+-- DBInstance CR (group dbaas.opencloud.wso2.com/v1alpha1) in the project
+-- namespace, which the dbaas controller provisions as a KubeVirt VM running
+-- PostgreSQL. No DatabaseBackend CRD — databases don't share infrastructure
+-- (different from key_vaults, which has a per-tenant OpenBao Backend).
+--
+-- Network mode is per-instance:
+--   'vpc'    → vnet_id + subnet_id must be set; the dbaas controller attaches
+--              the VM to the KubeOVN-managed NAD at
+--              (project-ns, subnets.backend_uid)
+--   'legacy' → nad_ref must be set ('<namespace>/<nad-name>' of a pre-existing
+--              Multus NAD on a VLAN bridge); used by lk prod today
+--
+-- engine is postgres-only in v1. Task 2 extends this to 'mysql', 'mssql' via
+-- DROP CONSTRAINT / ADD CONSTRAINT on databases_engine_check.
+--
+-- credentials_consumed_at follows the shown-once pattern from key_vaults:
+-- NULL = creds not yet retrieved; timestamp = consumed, GET .../credentials
+-- returns 410 Gone on subsequent calls.
+
+CREATE TABLE IF NOT EXISTS databases (
+    id                      UUID            PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id               TEXT            NOT NULL,
+    tenant_uuid             UUID            NOT NULL,
+    project_id              TEXT            NOT NULL,
+    project_uuid            UUID            NOT NULL REFERENCES projects(project_uuid) ON DELETE RESTRICT,
+
+    name                    TEXT            NOT NULL,
+    engine                  TEXT            NOT NULL DEFAULT 'postgres'
+        CONSTRAINT databases_engine_check CHECK (engine IN ('postgres')),
+    engine_version          TEXT,
+    instance_class          TEXT            NOT NULL,
+    allocated_storage_gb    INTEGER         NOT NULL CHECK (allocated_storage_gb > 0),
+
+    -- Network selection. Exactly one mode's fields must be populated.
+    network_mode            TEXT            NOT NULL CHECK (network_mode IN ('vpc', 'legacy')),
+    vnet_id                 UUID,
+    subnet_id               UUID,
+    nad_ref                 TEXT,
+
+    status                  resource_status NOT NULL DEFAULT 'PENDING',
+    message                 TEXT,
+
+    -- Endpoint cache, populated from the live CR status once the controller
+    -- has assigned the Multus IP and PostgreSQL is accepting connections.
+    endpoint_address        TEXT,
+    endpoint_port           INTEGER,
+
+    credentials_consumed_at TIMESTAMPTZ,
+
+    created_at              TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
+    updated_at              TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
+
+    UNIQUE (project_uuid, name),
+
+    -- Defense-in-depth: handler validates first, but if anything bypasses it
+    -- the row still can't be wedged into an invalid network state.
+    CONSTRAINT databases_network_fields_check CHECK (
+        (network_mode = 'vpc'
+            AND vnet_id IS NOT NULL AND subnet_id IS NOT NULL
+            AND nad_ref IS NULL)
+        OR
+        (network_mode = 'legacy'
+            AND nad_ref IS NOT NULL
+            AND vnet_id IS NULL AND subnet_id IS NULL)
+    )
+);
+
+CREATE INDEX IF NOT EXISTS idx_databases_tenant_uuid  ON databases (tenant_uuid);
+CREATE INDEX IF NOT EXISTS idx_databases_project_uuid ON databases (project_uuid);
+
+DROP TRIGGER IF EXISTS databases_updated_at ON databases;
+CREATE TRIGGER databases_updated_at
+    BEFORE UPDATE ON databases
+    FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
