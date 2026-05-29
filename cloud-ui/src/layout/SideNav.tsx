@@ -3,6 +3,7 @@ import {
   Apps20Regular,
   Box20Regular,
   CloudCube20Regular,
+  Database20Regular,
   Globe20Regular,
   History20Regular,
   Image20Regular,
@@ -103,6 +104,12 @@ const projectGroups: { label: string; items: NavItem[] }[] = [
     items: [
       { label: 'Key vaults', to: 'keyvaults', icon: <LockClosed20Regular /> },
       { label: 'Service accounts', to: 'service-accounts', icon: <Box20Regular /> },
+    ],
+  },
+  {
+    label: 'Managed services',
+    items: [
+      { label: 'Databases', to: 'databases', icon: <Database20Regular /> },
     ],
   },
 ];

@@ -14,6 +14,8 @@ import ClustersListPage from './pages/ClustersListPage';
 import ImagesPage from './pages/ImagesPage';
 import KeyVaultDetailPage from './pages/KeyVaultDetailPage';
 import KeyVaultsListPage from './pages/KeyVaultsListPage';
+import DatabaseDetailPage from './pages/DatabaseDetailPage';
+import DatabasesListPage from './pages/DatabasesListPage';
 import MembersPage from './pages/MembersPage';
 import ServiceAccountsPage from './pages/ServiceAccountsPage';
 import NSGDetailPage from './pages/NSGDetailPage';
@@ -65,6 +67,8 @@ export function buildRouter({ isDark, onToggleDark }: BuildRouterArgs) {
     { path: 'service-accounts', element: <ServiceAccountsPage /> },
     { path: 'keyvaults', element: <KeyVaultsListPage /> },
     { path: 'keyvaults/:kvId', element: <KeyVaultDetailPage /> },
+    { path: 'databases', element: <DatabasesListPage /> },
+    { path: 'databases/:dbId', element: <DatabaseDetailPage /> },
   ];
 
   const routes: RouteObject[] = [
