@@ -56,7 +56,9 @@ const INSTANCE_CLASSES = [
   'db.r5.large',
   'db.r5.xlarge',
   'db.r5.2xlarge',
-];
+] as const;
+
+type InstanceClass = typeof INSTANCE_CLASSES[number];
 
 export interface DatabaseCreated {
   id: string;
@@ -85,7 +87,7 @@ export default function DatabaseCreateDrawer({ open, onClose, onCreated }: Props
   // ── Form state ─────────────────────────────────────────────────────────────
 
   const [name, setName] = useState('');
-  const [instanceClass, setInstanceClass] = useState('db.t3.medium');
+  const [instanceClass, setInstanceClass] = useState<InstanceClass>('db.t3.medium');
   const [storageGb, setStorageGb] = useState(50);
 
   // ── Validation ─────────────────────────────────────────────────────────────
@@ -198,7 +200,7 @@ export default function DatabaseCreateDrawer({ open, onClose, onCreated }: Props
               <Dropdown
                 value={instanceClass}
                 selectedOptions={[instanceClass]}
-                onOptionSelect={(_, d) => setInstanceClass(d.optionValue ?? 'db.t3.medium')}
+                onOptionSelect={(_, d) => setInstanceClass((d.optionValue ?? 'db.t3.medium') as InstanceClass)}
               >
                 {INSTANCE_CLASSES.map((cls) => (
                   <Option key={cls} value={cls}>{cls}</Option>
