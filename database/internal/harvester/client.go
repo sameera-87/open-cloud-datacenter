@@ -100,6 +100,8 @@ type Client struct {
 	MgmtLogicalSwitch string
 }
 
+var _ Interface = (*Client)(nil)
+
 func NewClient(dyn dynamic.Interface, grafanaURL string) *Client {
 	return &Client{Dynamic: dyn, GrafanaURL: grafanaURL}
 }
@@ -230,52 +232,15 @@ func (c *Client) CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName
 	vmName = fmt.Sprintf("pg-%s", p.ID)
 	secretName = fmt.Sprintf("pg-%s-credentials", p.ID)
 
-	// Generate credentials
-	adminPw := randomString(32)
-	replPw := randomString(32)
-	exporterPw := randomString(24)
-
-	// Generate per-instance TLS: ephemeral CA + server cert signed by that CA.
-	// CA key is stored in the Secret alongside DB credentials (same threat model).
-	tls, tlsErr := generateTLS(vmName)
-	if tlsErr != nil {
-		err = fmt.Errorf("TLS generation: %w", tlsErr)
+	// Resolve the Harvester VirtualMachineImage before creating credentials.
+	// If the image is missing or not ready, we should fail without leaving an
+	// untracked Secret behind.
+	imgNs, imgName, imgSC, err := c.resolveVMImage(ctx, p.OSImage)
+	if err != nil {
 		return vmName, secretName, caCertPEM, err
 	}
-	caCertPEM = tls.CACertPEM
 
-	// Store credentials, cloud-init user data, and cloud-init network data
-	// in a K8s Secret. KubeVirt's cloudInitNoCloud datasource reads keys
-	// `userdata` and `networkdata` from this Secret and feeds them to the
-	// VM at the `init-local` stage — applying networkData early enough
-	// that systemd-networkd sees the right IP/gateway/DNS *before* it
-	// times out (which is what bit us when we tried writing the netplan
-	// via cloud-init's write_files module instead).
-	cloudInit := buildCloudInit(p, adminPw, replPw, exporterPw, tls)
-	networkData := buildNetworkData(p)
-	secret := newUnstructured("v1", "Secret", secretName, p.Namespace)
-	_ = unstructured.SetNestedField(secret.Object, "Opaque", "type")
-	_ = unstructured.SetNestedField(secret.Object, map[string]any{
-		"admin_user":        p.MasterUser,
-		"admin_password":    adminPw,
-		"repl_password":     replPw,
-		"exporter_password": exporterPw,
-		"ca_cert":           tls.CACertPEM,
-		"ca_key":            tls.CAKeyPEM,
-		"server_cert":       tls.ServerCertPEM,
-		"server_key":        tls.ServerKeyPEM,
-		"userdata":          cloudInit,
-		"networkdata":       networkData,
-	}, "stringData")
-	if _, e := c.Dynamic.Resource(secretGVR).Namespace(p.Namespace).Create(ctx, secret, metav1.CreateOptions{}); e != nil {
-		if err = ignoreAlreadyExists(e); err != nil {
-			return vmName, secretName, caCertPEM, err
-		}
-	}
-
-	// Resolve the Harvester VirtualMachineImage so the OS DataVolume can use
-	// the image-managed StorageClass (no cross-namespace PVC clone, no extra RBAC).
-	imgNs, imgName, imgSC, err := c.resolveVMImage(ctx, p.OSImage)
+	caCertPEM, err = c.createOrReuseCredentialSecret(ctx, p, vmName, secretName)
 	if err != nil {
 		return vmName, secretName, caCertPEM, err
 	}
@@ -384,6 +349,90 @@ func (c *Client) CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName
 	return vmName, secretName, caCertPEM, err
 }
 
+func (c *Client) createOrReuseCredentialSecret(ctx context.Context, p VMCreateParams, vmName, secretName string) (string, error) {
+	existing, err := c.Dynamic.Resource(secretGVR).Namespace(p.Namespace).Get(ctx, secretName, metav1.GetOptions{})
+	if err == nil {
+		// validate the secret
+		return credentialSecretCACert(existing)
+	}
+	if !apierrors.IsNotFound(err) {
+		return "", err
+	}
+
+	// Generate credentials
+	adminPw := randomString(32)
+	replPw := randomString(32)
+	exporterPw := randomString(24)
+
+	// Generate per-instance TLS: ephemeral CA + server cert signed by that CA.
+	// CA key is stored in the Secret alongside DB credentials (same threat model).
+	tls, tlsErr := generateTLS(vmName)
+	if tlsErr != nil {
+		return "", fmt.Errorf("TLS generation: %w", tlsErr)
+	}
+
+	// Store credentials, cloud-init user data, and cloud-init network data
+	// in a K8s Secret. KubeVirt's cloudInitNoCloud datasource reads keys
+	// `userdata` and `networkdata` from this Secret and feeds them to the
+	// VM at the `init-local` stage — applying networkData early enough
+	// that systemd-networkd sees the right IP/gateway/DNS *before* it
+	// times out (which is what bit us when we tried writing the netplan
+	// via cloud-init's write_files module instead).
+	cloudInit := buildCloudInit(p, adminPw, replPw, exporterPw, tls)
+	networkData := buildNetworkData(p)
+	secret := newUnstructured("v1", "Secret", secretName, p.Namespace)
+	_ = unstructured.SetNestedField(secret.Object, "Opaque", "type")
+	_ = unstructured.SetNestedField(secret.Object, map[string]any{
+		"admin_user":        p.MasterUser,
+		"admin_password":    adminPw,
+		"repl_password":     replPw,
+		"exporter_password": exporterPw,
+		"ca_cert":           tls.CACertPEM,
+		"ca_key":            tls.CAKeyPEM,
+		"server_cert":       tls.ServerCertPEM,
+		"server_key":        tls.ServerKeyPEM,
+		"userdata":          cloudInit,
+		"networkdata":       networkData,
+	}, "stringData")
+	if _, e := c.Dynamic.Resource(secretGVR).Namespace(p.Namespace).Create(ctx, secret, metav1.CreateOptions{}); e != nil {
+		if apierrors.IsAlreadyExists(e) {
+			existing, err := c.Dynamic.Resource(secretGVR).Namespace(p.Namespace).Get(ctx, secretName, metav1.GetOptions{})
+			if err != nil {
+				return "", err
+			}
+			return credentialSecretCACert(existing)
+		}
+		return "", e
+	}
+
+	return tls.CACertPEM, nil
+}
+
+func credentialSecretCACert(secret *unstructured.Unstructured) (string, error) {
+	// This function reads existing secret and extract the CA cert , If CA cert is invalid or empty will throow an Error
+	// branch for the real API Server
+	data, _, _ := unstructured.NestedStringMap(secret.Object, "data")
+	if encoded, ok := data["ca_cert"]; ok {
+		decoded, err := base64.StdEncoding.DecodeString(encoded)
+		if err != nil {
+			return "", fmt.Errorf("credentials Secret %s/%s has invalid ca_cert: %w", secret.GetNamespace(), secret.GetName(), err)
+		}
+		if len(decoded) == 0 {
+			return "", fmt.Errorf("credentials Secret %s/%s is missing ca_cert", secret.GetNamespace(), secret.GetName())
+		}
+		return string(decoded), nil
+	}
+
+	// Branch for fake client tests or manually constructred unstructred secrets only
+	// client_test.TestCreatePostgresVMCreatesSecretAndReturnsStoredCA() will use this part
+	stringData, _, _ := unstructured.NestedStringMap(secret.Object, "stringData")
+	if caCert := stringData["ca_cert"]; caCert != "" {
+		return caCert, nil
+	}
+
+	return "", fmt.Errorf("credentials Secret %s/%s is missing ca_cert", secret.GetNamespace(), secret.GetName())
+}
+
 // GetVMIReadiness fetches the VMI once and returns phase, IP, and postgres-readiness.
 func (c *Client) GetVMIReadiness(ctx context.Context, ns, vmName string) (VMIReadiness, error) {
 	vmi, err := c.Dynamic.Resource(vmiGVR).Namespace(ns).Get(ctx, vmName, metav1.GetOptions{})
@@ -435,6 +484,7 @@ func (c *Client) setVMRunning(ctx context.Context, ns, vmName string, running bo
 }
 
 // GetSecret returns the Secret's data map (values are raw bytes).
+// Not used so no need to include in the new interface.
 func (c *Client) GetSecret(ctx context.Context, ns, name string) (map[string][]byte, error) {
 	obj, err := c.Dynamic.Resource(secretGVR).Namespace(ns).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
