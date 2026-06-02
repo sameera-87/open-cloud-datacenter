@@ -100,6 +100,8 @@ type Client struct {
 	MgmtLogicalSwitch string
 }
 
+var _ Interface = (*Client)(nil)
+
 func NewClient(dyn dynamic.Interface, grafanaURL string) *Client {
 	return &Client{Dynamic: dyn, GrafanaURL: grafanaURL}
 }
@@ -350,6 +352,7 @@ func (c *Client) CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName
 func (c *Client) createOrReuseCredentialSecret(ctx context.Context, p VMCreateParams, vmName, secretName string) (string, error) {
 	existing, err := c.Dynamic.Resource(secretGVR).Namespace(p.Namespace).Get(ctx, secretName, metav1.GetOptions{})
 	if err == nil {
+		// validate the secret
 		return credentialSecretCACert(existing)
 	}
 	if !apierrors.IsNotFound(err) {
@@ -481,6 +484,7 @@ func (c *Client) setVMRunning(ctx context.Context, ns, vmName string, running bo
 }
 
 // GetSecret returns the Secret's data map (values are raw bytes).
+// Not used so no need to include in the new interface.
 func (c *Client) GetSecret(ctx context.Context, ns, name string) (map[string][]byte, error) {
 	obj, err := c.Dynamic.Resource(secretGVR).Namespace(ns).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
