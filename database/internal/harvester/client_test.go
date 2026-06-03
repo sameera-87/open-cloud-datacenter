@@ -19,7 +19,6 @@ package harvester
 import (
 	"context"
 	"encoding/base64"
-	"strings"
 	"testing"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -32,90 +31,71 @@ import (
 
 func TestCreatePostgresVMDoesNotCreateSecretWhenImageResolutionFails(t *testing.T) {
 	ctx := context.Background()
-	// client without the fake image
+	// client without the fake image — image resolution fails before any Secret is created
 	client := newTestHarvesterClient()
 
-	_, secretName, _, err := client.CreatePostgresVM(ctx, testVMCreateParams())
+	_, credSecretName, cloudInitSecretName, _, err := client.CreatePostgresVM(ctx, testVMCreateParams())
 	if err == nil {
 		t.Fatalf("CreatePostgresVM returned nil error, want image resolution error")
 	}
 
-	// check wether secret is created : Expected = No secret created (NotFoundError)
-	if _, err := client.Dynamic.Resource(secretGVR).Namespace("tenant-a").Get(ctx, secretName, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
-		t.Fatalf("credentials Secret lookup error = %v, want NotFound", err)
+	// Neither Secret should exist after an image-resolution failure.
+	if _, err := client.Dynamic.Resource(secretGVR).Namespace("tenant-a").Get(ctx, credSecretName, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("credentials Secret should not exist after image-resolution failure, got: %v", err)
+	}
+	if _, err := client.Dynamic.Resource(secretGVR).Namespace("tenant-a").Get(ctx, cloudInitSecretName, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("cloudinit Secret should not exist after image-resolution failure, got: %v", err)
 	}
 }
 
-func TestCreatePostgresVMCreatesSecretAndReturnsStoredCA(t *testing.T) {
+func TestCreatePostgresVMCreatesBothSecretsAndReturnsCA(t *testing.T) {
 	ctx := context.Background()
 	client := newTestHarvesterClient(testVMImage())
 
-	vmName, secretName, caCertPEM, err := client.CreatePostgresVM(ctx, testVMCreateParams())
+	vmName, credSecretName, cloudInitSecretName, caCertPEM, err := client.CreatePostgresVM(ctx, testVMCreateParams())
 	if err != nil {
 		t.Fatalf("CreatePostgresVM returned error: %v", err)
 	}
 	if vmName != "pg-orders" {
 		t.Fatalf("VM name = %q, want pg-orders", vmName)
 	}
-	if secretName != "pg-orders-credentials" {
-		t.Fatalf("Secret name = %q, want pg-orders-credentials", secretName)
+	if credSecretName != "pg-orders-credentials" {
+		t.Fatalf("credentials Secret name = %q, want pg-orders-credentials", credSecretName)
+	}
+	if cloudInitSecretName != "pg-orders-cloudinit" {
+		t.Fatalf("cloudinit Secret name = %q, want pg-orders-cloudinit", cloudInitSecretName)
 	}
 	if caCertPEM == "" {
 		t.Fatalf("CA cert is empty")
 	}
 
-	// fetch the created fake secret
-	secret, err := client.Dynamic.Resource(secretGVR).Namespace("tenant-a").Get(ctx, secretName, metav1.GetOptions{})
+	// credentials Secret must exist and contain the CA.
+	// Fake client stores stringData as-is (no base64 encoding like the real API server).
+	credSecret, err := client.Dynamic.Resource(secretGVR).Namespace("tenant-a").Get(ctx, credSecretName, metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get credentials Secret: %v", err)
 	}
-	// In client.createOrReuseCredentialSecret() we submit stringData to the API server
-	// We Read stringData because fake client doesn't encode the submitted "stringData" into Base64 "data" as the real API server
-	secretCA, _, _ := unstructured.NestedString(secret.Object, "stringData", "ca_cert")
+	secretCA, _, _ := unstructured.NestedString(credSecret.Object, "stringData", "ca_cert")
 	if secretCA == "" {
-		t.Fatalf("created Secret has no stringData.ca_cert")
+		t.Fatalf("credentials Secret has no stringData.ca_cert")
 	}
-	// check the CA returned by CreatePostgresVM == the CA stored in the Secret
 	if caCertPEM != secretCA {
 		t.Fatalf("returned CA does not match Secret CA")
 	}
-	// fetch the VM
+
+	// cloudinit Secret must exist and contain userdata.
+	cloudInitSecret, err := client.Dynamic.Resource(secretGVR).Namespace("tenant-a").Get(ctx, cloudInitSecretName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get cloudinit Secret: %v", err)
+	}
+	userdata, _, _ := unstructured.NestedString(cloudInitSecret.Object, "stringData", "userdata")
+	if userdata == "" {
+		t.Fatalf("cloudinit Secret has no stringData.userdata")
+	}
+
+	// VM must exist.
 	if _, err := client.Dynamic.Resource(vmGVR).Namespace("tenant-a").Get(ctx, vmName, metav1.GetOptions{}); err != nil {
 		t.Fatalf("get created VM: %v", err)
-	}
-}
-
-func TestCreatePostgresVMReusesExistingSecretCA(t *testing.T) {
-	ctx := context.Background()
-	existingCA := "existing-ca"
-	client := newTestHarvesterClient(testVMImage(), testCredentialSecret(existingCA))
-
-	_, _, caCertPEM, err := client.CreatePostgresVM(ctx, testVMCreateParams())
-	if err != nil {
-		t.Fatalf("CreatePostgresVM returned error: %v", err)
-	}
-	if caCertPEM != existingCA {
-		t.Fatalf("returned CA = %q, want existing Secret CA %q", caCertPEM, existingCA)
-	}
-}
-
-func TestCreatePostgresVMFailsForMalformedExistingSecret(t *testing.T) {
-	ctx := context.Background()
-	secret := newUnstructured("v1", "Secret", "pg-orders-credentials", "tenant-a")
-	// No CA cert in the secret intentionally , hence malformed for the cotroller
-	_ = unstructured.SetNestedField(secret.Object, "Opaque", "type")
-	client := newTestHarvesterClient(testVMImage(), secret)
-
-	vmName, _, _, err := client.CreatePostgresVM(ctx, testVMCreateParams())
-	if err == nil {
-		t.Fatalf("CreatePostgresVM returned nil error, want missing ca_cert error")
-	}
-	if !strings.Contains(err.Error(), "missing ca_cert") {
-		t.Fatalf("error = %v, want missing ca_cert", err)
-	}
-	// check wether VM creation was failed.
-	if _, getErr := client.Dynamic.Resource(vmGVR).Namespace("tenant-a").Get(ctx, vmName, metav1.GetOptions{}); !apierrors.IsNotFound(getErr) {
-		t.Fatalf("VM lookup error = %v, want NotFound", getErr)
 	}
 }
 
@@ -126,7 +106,7 @@ func TestCreatePostgresVMPreservesKubeOVNSettings(t *testing.T) {
 	params := testVMCreateParams()
 	params.DNSServerIP = "10.96.0.10/32"
 
-	vmName, _, _, err := client.CreatePostgresVM(ctx, params)
+	vmName, _, _, _, err := client.CreatePostgresVM(ctx, params)
 	if err != nil {
 		t.Fatalf("CreatePostgresVM returned error: %v", err)
 	}

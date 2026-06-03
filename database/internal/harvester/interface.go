@@ -29,12 +29,14 @@ type Interface interface {
 	CreateDataVolume(ctx context.Context, id, ns string, sizeGB int, storageClass string) (string, error)
 	ResizeDataVolume(ctx context.Context, ns, dvName string, newSizeGB int) error
 
-	CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName, secretName, caCertPEM string, err error)
+	CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName, credSecretName, cloudInitSecretName, caCertPEM string, err error)
 	GetVMIReadiness(ctx context.Context, ns, vmName string) (VMIReadiness, error)
 	DialVMListener(ctx context.Context, ns, vmName string, port int) error
 	StopVM(ctx context.Context, ns, vmName string) error
 	StartVM(ctx context.Context, ns, vmName string) error
 	ResizeVM(ctx context.Context, ns, vmName string, cpuCores, memoryMB int) error
+
+	DeleteSecret(ctx context.Context, ns, name string) error
 
 	DeployMonitoring(ctx context.Context, id, ns, vmIP string) (svcName, smName, grafanaURL, promTarget string, err error)
 	TeardownAll(ctx context.Context, id, ns string, refs dbaasv1.ResourceRefs) error
