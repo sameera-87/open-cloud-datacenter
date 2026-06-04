@@ -100,7 +100,7 @@ type Client struct {
 	MgmtLogicalSwitch string
 }
 
-var _ Interface = (*Client)(nil)
+var _ ClientInterface = (*Client)(nil)
 
 func NewClient(dyn dynamic.Interface, grafanaURL string) *Client {
 	return &Client{Dynamic: dyn, GrafanaURL: grafanaURL}

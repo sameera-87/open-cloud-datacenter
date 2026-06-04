@@ -37,7 +37,7 @@ import (
 // probeListener is the function phaseWaitReady calls to confirm postgres
 // is actually accepting TCP before marking the instance DatabaseReady.
 // Package-level var so tests can stub it without doing real network I/O.
-var probeListener = func(c harvester.Interface, ctx context.Context, ns, vmName string, port int) error {
+var probeListener = func(c harvester.ClientInterface, ctx context.Context, ns, vmName string, port int) error {
 	return c.DialVMListener(ctx, ns, vmName, port)
 }
 
@@ -57,7 +57,7 @@ const (
 // updates the status, and requeues for the next phase.
 type DBInstanceReconciler struct {
 	client.Client
-	Harvester harvester.Interface
+	Harvester harvester.ClientInterface
 }
 
 // DBInstance CRD permissions.

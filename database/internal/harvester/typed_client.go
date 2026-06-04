@@ -8,7 +8,7 @@ import (
 )
 
 // TypedClient is a dependency spike for using Harvester's generated clientset
-// and VM builder helpers behind Interface.
+// and VM builder helpers behind ClientInterface.
 type TypedClient struct {
 	Clientset  harvesterclientset.Interface
 	GrafanaURL string

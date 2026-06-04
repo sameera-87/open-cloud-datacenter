@@ -22,10 +22,10 @@ import (
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
 )
 
-// Interface is the controller-facing Harvester contract. It intentionally
+// ClientInterface is the controller-facing Harvester contract. It intentionally
 // hides whether Harvester resources are managed through the dynamic client or
 // future typed clients.
-type Interface interface {
+type ClientInterface interface {
 	CreateDataVolume(ctx context.Context, id, ns string, sizeGB int, storageClass string) (string, error)
 	ResizeDataVolume(ctx context.Context, ns, dvName string, newSizeGB int) error
 
