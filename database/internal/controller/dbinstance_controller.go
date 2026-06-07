@@ -34,13 +34,6 @@ import (
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/harvester"
 )
 
-// probeListener is the function phaseWaitReady calls to confirm postgres
-// is actually accepting TCP before marking the instance DatabaseReady.
-// Package-level var so tests can stub it without doing real network I/O.
-var probeListener = func(c harvester.ClientInterface, ctx context.Context, ns, vmName string, port int) error {
-	return c.DialVMListener(ctx, ns, vmName, port)
-}
-
 // Controller-side defaults for fields the user can leave blank on the
 // DBInstance spec. Centralised here so phaseStorage, phaseVM, and
 // immutableDrift can't drift apart over time. A change here should be
@@ -299,22 +292,11 @@ func (r *DBInstanceReconciler) phaseWaitReady(ctx context.Context, inst *dbaasv1
 		dbName = inst.Name
 	}
 
-	// Second gate: PostgreSQL is actually accepting TCP connections on its
-	// listener. The guest-agent IP alone is too weak — the agent starts as
-	// soon as `apt install` finishes, well before bootstrap.sh has moved
-	// pgdata onto the dedicated disk, restarted postgres, and created the
-	// admin role. A pure VMI-readiness gate has previously let a broken
-	// postgres slip through as "available".
-	//
-	// The probe is a net.DialTimeout from inside the controller process
-	// against the VM's mgmt-net pod-network IP (see harvester.DialVMListener
-	// for why). TCP-only — not a SQL ping — keeps the controller free of
-	// a DB driver dependency; postgres opens its listener only when it
-	// is genuinely ready to accept SQL, so a successful dial is a
-	// sufficient signal.
-	if derr := probeListener(r.Harvester, ctx, ns, inst.Status.Resources.VMName, port); derr != nil {
-		inst.Status.Message = fmt.Sprintf("Waiting for PostgreSQL listener at %s:%d: %v",
-			readiness.IP, port, derr)
+	// Second gate: KubeVirt's VMI readiness probe (pg_isready via QGA virtio
+	// channel) has passed. The probe is defined on the VM spec and runs inside
+	// the guest — no pod-network port exposure required.
+	if !readiness.Ready {
+		inst.Status.Message = fmt.Sprintf("Waiting for PostgreSQL readiness probe at %s:%d", readiness.IP, port)
 		inst.Status.ProvisioningPhase = dbaasv1.PhaseWaitingForCloudInit
 		_ = r.statusUpdate(ctx, inst)
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
