@@ -188,8 +188,26 @@ func TestTypedCreatePostgresVMPreservesVMShape(t *testing.T) {
 	if !vmVolumeUsesPVC(vm, "pgdata-disk", "pg-orders-data") {
 		t.Fatalf("pgdata-disk volume does not use PVC pg-orders-data")
 	}
-	if !vmInterfaceHasPort(vm, mgmtNetInterface, 5432) {
-		t.Fatalf("mgmt-net interface does not expose PostgreSQL port")
+	// Port 5432 must not be forwarded through the masquerade interface — the
+	// readiness probe uses the QGA virtio channel, not the pod network.
+	if vmInterfaceHasPort(vm, mgmtNetInterface, 5432) {
+		t.Fatalf("mgmt-net interface must not expose port 5432 on the pod network")
+	}
+
+	// Readiness probe must be configured as an exec probe via the guest agent.
+	probe := vm.Spec.Template.Spec.ReadinessProbe
+	if probe == nil {
+		t.Fatalf("ReadinessProbe is not set")
+	}
+	if probe.Exec == nil {
+		t.Fatalf("ReadinessProbe.Exec is not set")
+	}
+	if !strings.Contains(strings.Join(probe.Exec.Command, " "), "pg_isready") {
+		t.Fatalf("ReadinessProbe command does not contain pg_isready: %v", probe.Exec.Command)
+	}
+	if probe.InitialDelaySeconds != 30 || probe.PeriodSeconds != 10 || probe.FailureThreshold != 6 {
+		t.Fatalf("ReadinessProbe timing initial=%d period=%d failure=%d, want 30/10/6",
+			probe.InitialDelaySeconds, probe.PeriodSeconds, probe.FailureThreshold)
 	}
 
 	raw, err := json.Marshal(vm)
@@ -415,6 +433,11 @@ func testTypedVMImage() *harvesterhciov1beta1.VirtualMachineImage {
 		TypeMeta:   metav1.TypeMeta{APIVersion: "harvesterhci.io/v1beta1", Kind: "VirtualMachineImage"},
 		ObjectMeta: metav1.ObjectMeta{Name: "ubuntu-22.04", Namespace: "default"},
 		Spec:       harvesterhciov1beta1.VirtualMachineImageSpec{DisplayName: "Ubuntu 22.04"},
-		Status:     harvesterhciov1beta1.VirtualMachineImageStatus{StorageClassName: "longhorn-image-ubuntu"},
+		Status: harvesterhciov1beta1.VirtualMachineImageStatus{
+			StorageClassName: "longhorn-image-ubuntu",
+			Conditions: []harvesterhciov1beta1.Condition{
+				{Type: harvesterhciov1beta1.ImageImported, Status: corev1.ConditionTrue},
+			},
+		},
 	}
 }

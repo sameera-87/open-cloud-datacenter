@@ -480,7 +480,24 @@ func (c *TypedClient) buildPostgresVM(p VMCreateParams, vmName, cloudInitSecretN
 	vm.Spec.Template.ObjectMeta.Annotations = mergeStringMap(vm.Spec.Template.ObjectMeta.Annotations, annotations) // Kube - OVN Annotation
 	vm.Spec.Template.Spec.Domain.CPU.Sockets = 1
 	vm.Spec.Template.Spec.Domain.CPU.Threads = 1
-	setInterfacePorts(vm, mgmtNetInterface, []kubevirtv1.Port{{Port: int32(p.Port), Protocol: "TCP"}}) // setting 5432 port on pod network
+
+	// Readiness probe: pg_isready runs inside the guest via the QEMU guest agent
+	// virtio channel — no pod-network port exposure required.
+	vm.Spec.Template.Spec.ReadinessProbe = &kubevirtv1.Probe{
+		Handler: kubevirtv1.Handler{
+			Exec: &corev1.ExecAction{
+				Command: []string{
+					"/bin/sh", "-c",
+					fmt.Sprintf("pg_isready -h 127.0.0.1 -p %d -U %s -d postgres", p.Port, p.MasterUser),
+				},
+			},
+		},
+		InitialDelaySeconds: 30,
+		PeriodSeconds:       10,
+		TimeoutSeconds:      5,
+		SuccessThreshold:    1,
+		FailureThreshold:    6,
+	}
 
 	// on Kube-OVN/VPC networking, the default DNS inherited through KubeVirt/launcher behavior can be wrong for VM bootstrapping.
 	// If DNS is wrong, cloud-init may fail during apt install postgresql.. This block forces the VM path to use the intended per-VPC DNS server.
@@ -649,7 +666,7 @@ func mergeStringMap(base map[string]string, overlay map[string]string) map[strin
 	}
 	return out
 }
-
+// Not used anymore ; clean up later 
 func setInterfacePorts(vm *kubevirtv1.VirtualMachine, interfaceName string, ports []kubevirtv1.Port) {
 	for i := range vm.Spec.Template.Spec.Domain.Devices.Interfaces {
 		if vm.Spec.Template.Spec.Domain.Devices.Interfaces[i].Name == interfaceName {
