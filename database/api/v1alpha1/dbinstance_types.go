@@ -299,6 +299,22 @@ type DBInstanceStatus struct {
 	// through to the running database. Used for honest modify semantics.
 	// +optional
 	AppliedSpec *AppliedSpec `json:"appliedSpec,omitempty"`
+
+	// RestartCount is the cumulative number of VM restarts detected or
+	// initiated by the controller liveness loop (both planned and unplanned).
+	// +optional
+	RestartCount int `json:"restartCount,omitempty"`
+
+	// LastKnownVMIUID is the UID of the VMI last recorded by the controller.
+	// A UID change during phaseAvailable indicates an unplanned restart.
+	// +optional
+	LastKnownVMIUID string `json:"lastKnownVMIUID,omitempty"`
+
+	// ConsecutiveUnhealthyCount is the number of consecutive phaseAvailable
+	// reconciles where the VMI was not fully healthy (Ready=False or
+	// AgentConnected=False). Reset to zero on any healthy reconcile or restart.
+	// +optional
+	ConsecutiveUnhealthyCount int `json:"consecutiveUnhealthyCount,omitempty"`
 }
 
 // AppliedSpec records the subset of DBInstanceSpec fields that are
@@ -423,6 +439,17 @@ const (
 	// MasterUserSecretRef.Status values.
 	SecretStatusActive   = "active"
 	SecretStatusImpaired = "impaired"
+
+	// Condition type constants for DBInstance liveness monitoring.
+	// These are the Type field of entries in Status.Conditions.
+	ConditionDegraded = "Degraded" // VMI unhealthy for N consecutive reconciles
+	ConditionFailed   = "Failed"   // restart count exceeded the maximum
+
+	// Condition reason constants (Conditions[].Reason).
+	ReasonPostgresUnreachable    = "PostgresUnreachable"
+	ReasonGuestAgentDisconnected = "GuestAgentDisconnected"
+	ReasonVMRestarting           = "VMRestarting"
+	ReasonMaxRestartsExceeded    = "MaxRestartsExceeded"
 
 	// Label keys applied to all Harvester resources owned by a DBInstance.
 	LabelInstance = "dbaas.opencloud.wso2.com/instance"
