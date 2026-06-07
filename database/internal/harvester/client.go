@@ -137,13 +137,20 @@ type VMCreateParams struct {
 	DNSServerIP string
 }
 
-// VMIReadiness bundles phase + IP from a single VMI fetch. The IP being
-// populated is itself a strong readiness signal: qemu-guest-agent registers
-// it only after our bootstrap.sh has finished `apt install postgresql ...`
-// and started the agent — so the caller does not need an extra timer.
+// VMIReadiness bundles the VMI state fields needed for phase gating and
+// liveness monitoring from a single VMI fetch.
+//
+//   - Running: VMI phase is Running.
+//   - IP: data-network IP reported by the guest agent; empty until QGA populates it.
+//   - Ready: VMI readiness condition is True (readiness probe has passed).
+//   - AgentConnected: QGA virtio channel is active.
+//   - VMIUID: VMI object UID; a change across reconciles indicates an unplanned restart.
 type VMIReadiness struct {
-	Running bool
-	IP      string
+	Running        bool
+	IP             string
+	Ready          bool
+	AgentConnected bool
+	VMIUID         string
 }
 
 // ============================================================
@@ -402,6 +409,10 @@ func (c *Client) CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName
 }
 
 // GetVMIReadiness fetches the VMI once and returns phase, IP, and postgres-readiness.
+//
+// NOTE: Ready, AgentConnected, and VMIUID are not yet populated by the dynamic
+// client. They will be added when the dynamic client is updated (see migration plan
+// Step 3 — dynamic client). The TypedClient implementation populates all fields.
 func (c *Client) GetVMIReadiness(ctx context.Context, ns, vmName string) (VMIReadiness, error) {
 	vmi, err := c.Dynamic.Resource(vmiGVR).Namespace(ns).Get(ctx, vmName, metav1.GetOptions{})
 	if err != nil {

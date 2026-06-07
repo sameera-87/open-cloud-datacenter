@@ -176,13 +176,24 @@ func (c *TypedClient) GetVMIReadiness(ctx context.Context, ns, vmName string) (V
 		return VMIReadiness{}, err
 	}
 
-	readiness := VMIReadiness{Running: string(vmi.Status.Phase) == vmiPhaseRunning}
+	readiness := VMIReadiness{
+		Running: string(vmi.Status.Phase) == vmiPhaseRunning,
+		VMIUID:  string(vmi.UID),
+	}
 	for _, iface := range vmi.Status.Interfaces {
 		if iface.Name != dataNetInterface {
 			continue
 		}
 		readiness.IP = iface.IP
 		break
+	}
+	for _, cond := range vmi.Status.Conditions {
+		switch cond.Type {
+		case kubevirtv1.VirtualMachineInstanceReady:
+			readiness.Ready = cond.Status == corev1.ConditionTrue
+		case kubevirtv1.VirtualMachineInstanceAgentConnected:
+			readiness.AgentConnected = cond.Status == corev1.ConditionTrue
+		}
 	}
 	return readiness, nil
 }

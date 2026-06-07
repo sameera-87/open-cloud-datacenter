@@ -266,6 +266,67 @@ func TestTypedGetVMIReadinessDoesNotFallbackToMgmtNet(t *testing.T) {
 	}
 }
 
+func TestTypedGetVMIReadinessSurfacesConditionsAndUID(t *testing.T) {
+	ctx := context.Background()
+	client := newTestTypedClient(&kubevirtv1.VirtualMachineInstance{
+		TypeMeta:   metav1.TypeMeta{APIVersion: "kubevirt.io/v1", Kind: "VirtualMachineInstance"},
+		ObjectMeta: metav1.ObjectMeta{Name: "pg-orders", Namespace: "tenant-a", UID: "abc-123"},
+		Status: kubevirtv1.VirtualMachineInstanceStatus{
+			Phase: kubevirtv1.Running,
+			Interfaces: []kubevirtv1.VirtualMachineInstanceNetworkInterface{
+				{Name: dataNetInterface, IP: "192.168.40.50"},
+			},
+			Conditions: []kubevirtv1.VirtualMachineInstanceCondition{
+				{Type: kubevirtv1.VirtualMachineInstanceReady, Status: corev1.ConditionTrue},
+				{Type: kubevirtv1.VirtualMachineInstanceAgentConnected, Status: corev1.ConditionTrue},
+			},
+		},
+	})
+
+	r, err := client.GetVMIReadiness(ctx, "tenant-a", "pg-orders")
+	if err != nil {
+		t.Fatalf("GetVMIReadiness returned error: %v", err)
+	}
+	if !r.Running {
+		t.Fatalf("Running = false, want true")
+	}
+	if r.IP != "192.168.40.50" {
+		t.Fatalf("IP = %q, want 192.168.40.50", r.IP)
+	}
+	if !r.Ready {
+		t.Fatalf("Ready = false, want true")
+	}
+	if !r.AgentConnected {
+		t.Fatalf("AgentConnected = false, want true")
+	}
+	if r.VMIUID != "abc-123" {
+		t.Fatalf("VMIUID = %q, want abc-123", r.VMIUID)
+	}
+}
+
+func TestTypedGetVMIReadinessConditionsDefaultToFalseWhenAbsent(t *testing.T) {
+	ctx := context.Background()
+	client := newTestTypedClient(&kubevirtv1.VirtualMachineInstance{
+		TypeMeta:   metav1.TypeMeta{APIVersion: "kubevirt.io/v1", Kind: "VirtualMachineInstance"},
+		ObjectMeta: metav1.ObjectMeta{Name: "pg-orders", Namespace: "tenant-a", UID: "xyz-456"},
+		Status: kubevirtv1.VirtualMachineInstanceStatus{
+			Phase: kubevirtv1.Running,
+			// No conditions set — VMI booting, probes not yet evaluated.
+		},
+	})
+
+	r, err := client.GetVMIReadiness(ctx, "tenant-a", "pg-orders")
+	if err != nil {
+		t.Fatalf("GetVMIReadiness returned error: %v", err)
+	}
+	if r.Ready || r.AgentConnected {
+		t.Fatalf("Ready=%v AgentConnected=%v, want both false when conditions absent", r.Ready, r.AgentConnected)
+	}
+	if r.VMIUID != "xyz-456" {
+		t.Fatalf("VMIUID = %q, want xyz-456", r.VMIUID)
+	}
+}
+
 func TestTypedStartStopAndResizeVM(t *testing.T) {
 	ctx := context.Background()
 	running := true
