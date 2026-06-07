@@ -108,21 +108,23 @@ func NewClient(dyn dynamic.Interface, grafanaURL string) *Client {
 
 // VMCreateParams bundles everything needed to create a PostgreSQL VM.
 type VMCreateParams struct {
-	ID             string
-	Namespace      string
-	CPUCores       int
-	MemoryMB       int
-	OSImage        string
-	DataVolumeRef  string
-	NADName        string
-	MasterUser     string
-	DBName         string
-	Port           int
-	MaxConnections int
-	BackupEnabled  bool
-	BackupWindow   string
-	S3Config       *dbaasv1.S3BackupConfig
-	VMPassword     string
+	ID                     string
+	Namespace              string
+	CPUCores               int
+	MemoryMB               int
+	OSImage                string
+	DataVolumeRef          string
+	DataVolumeSizeGB       int
+	DataVolumeStorageClass string
+	NADName                string
+	MasterUser             string
+	DBName                 string
+	Port                   int
+	MaxConnections         int
+	BackupEnabled          bool
+	BackupWindow           string
+	S3Config               *dbaasv1.S3BackupConfig
+	VMPassword             string
 	// StaticNetwork, when non-nil, makes the cloud-init netplan use a
 	// static IPv4 config instead of DHCP. Used on VLANs without a DHCP
 	// server.
