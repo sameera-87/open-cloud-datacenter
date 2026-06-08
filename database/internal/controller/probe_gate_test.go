@@ -29,11 +29,13 @@ import (
 	ctrlfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-// stubHarvester satisfies harvester.ClientInterface for phaseWaitReady tests.
-// Only GetVMIReadiness returns meaningful values; all other methods are no-ops.
+// stubHarvester satisfies harvester.ClientInterface for controller unit tests.
+// Set the exported error fields to inject failures into specific methods.
 type stubHarvester struct {
 	readiness    harvester.VMIReadiness
 	readinessErr error
+	stopVMErr    error
+	startVMErr   error
 }
 
 func (s *stubHarvester) GetVMIReadiness(_ context.Context, _, _ string) (harvester.VMIReadiness, error) {
@@ -47,8 +49,8 @@ func (s *stubHarvester) CreatePostgresVM(_ context.Context, _ harvester.VMCreate
 	return "", "", "", "", nil
 }
 func (s *stubHarvester) DialVMListener(_ context.Context, _, _ string, _ int) error { return nil }
-func (s *stubHarvester) StopVM(_ context.Context, _, _ string) error                { return nil }
-func (s *stubHarvester) StartVM(_ context.Context, _, _ string) error               { return nil }
+func (s *stubHarvester) StopVM(_ context.Context, _, _ string) error                { return s.stopVMErr }
+func (s *stubHarvester) StartVM(_ context.Context, _, _ string) error               { return s.startVMErr }
 func (s *stubHarvester) ResizeVM(_ context.Context, _, _ string, _, _ int) error    { return nil }
 func (s *stubHarvester) DeleteSecret(_ context.Context, _, _ string) error          { return nil }
 func (s *stubHarvester) DeployMonitoring(_ context.Context, _, _, _ string) (string, string, string, string, error) {
