@@ -495,8 +495,7 @@ func (c *TypedClient) buildPostgresVM(p VMCreateParams, vmName, cloudInitSecretN
 			UserDataSecretName:    cloudInitSecretName,
 			NetworkDataSecretName: cloudInitSecretName,
 		}).
-		NetworkInterface(dataNetInterface, string(kubevirtv1.VirtIO), "", harvesterbuilder.NetworkInterfaceTypeBridge, typedVMNetworkName(p.Namespace, p.NADName)).
-		NetworkInterface(mgmtNetInterface, string(kubevirtv1.VirtIO), "", harvesterbuilder.NetworkInterfaceTypeMasquerade, "")
+		NetworkInterface(dataNetInterface, string(kubevirtv1.VirtIO), "", harvesterbuilder.NetworkInterfaceTypeBridge, typedVMNetworkName(p.Namespace, p.NADName))
 
 	vm, err := vmBuilder.VM()
 	if err != nil {
@@ -692,15 +691,6 @@ func mergeStringMap(base map[string]string, overlay map[string]string) map[strin
 		out[k] = v
 	}
 	return out
-}
-// Not used anymore ; clean up later 
-func setInterfacePorts(vm *kubevirtv1.VirtualMachine, interfaceName string, ports []kubevirtv1.Port) {
-	for i := range vm.Spec.Template.Spec.Domain.Devices.Interfaces {
-		if vm.Spec.Template.Spec.Domain.Devices.Interfaces[i].Name == interfaceName {
-			vm.Spec.Template.Spec.Domain.Devices.Interfaces[i].Ports = ports
-			return
-		}
-	}
 }
 
 func ptr[T any](v T) *T {

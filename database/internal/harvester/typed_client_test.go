@@ -188,10 +188,10 @@ func TestTypedCreatePostgresVMPreservesVMShape(t *testing.T) {
 	if !vmVolumeUsesPVC(vm, "pgdata-disk", "pg-orders-data") {
 		t.Fatalf("pgdata-disk volume does not use PVC pg-orders-data")
 	}
-	// Port 5432 must not be forwarded through the masquerade interface — the
-	// readiness probe uses the QGA virtio channel, not the pod network.
-	if vmInterfaceHasPort(vm, mgmtNetInterface, 5432) {
-		t.Fatalf("mgmt-net interface must not expose port 5432 on the pod network")
+	// The VM must have only the data-net interface — mgmt-net (masquerade)
+	// is removed; the readiness probe uses the QGA virtio channel instead.
+	if vmHasInterface(vm, mgmtNetInterface) {
+		t.Fatalf("mgmt-net interface must not be attached to the VM")
 	}
 
 	// Readiness probe must be configured as an exec probe via the guest agent.
@@ -469,6 +469,15 @@ func findPVCTemplate(pvcs []*corev1.PersistentVolumeClaim, name string) *corev1.
 func vmVolumeUsesPVC(vm *kubevirtv1.VirtualMachine, volumeName, claimName string) bool {
 	for _, volume := range vm.Spec.Template.Spec.Volumes {
 		if volume.Name == volumeName && volume.PersistentVolumeClaim != nil && volume.PersistentVolumeClaim.ClaimName == claimName {
+			return true
+		}
+	}
+	return false
+}
+
+func vmHasInterface(vm *kubevirtv1.VirtualMachine, interfaceName string) bool {
+	for _, iface := range vm.Spec.Template.Spec.Domain.Devices.Interfaces {
+		if iface.Name == interfaceName {
 			return true
 		}
 	}

@@ -1,4 +1,4 @@
-//go:build hv005_typed_client
+//go:build !hv005_dynamic_client
 
 package main
 
