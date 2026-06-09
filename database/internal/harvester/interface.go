@@ -37,6 +37,11 @@ type ClientInterface interface {
 	ResizeVM(ctx context.Context, ns, vmName string, cpuCores, memoryMB int) error
 
 	DeleteSecret(ctx context.Context, ns, name string) error
+	// RemoveCloudInitDisk patches the VM spec to remove the cloudinit disk and
+	// volume so future VMI restarts don't try to mount the cloud-init secret.
+	// Must be called before DeleteSecret on the cloud-init secret; otherwise
+	// poweroff/restart leaves the VM stuck in Starting with FailedMount.
+	RemoveCloudInitDisk(ctx context.Context, ns, vmName string) error
 
 	DeployMonitoring(ctx context.Context, id, ns, vmIP string) (svcName, smName, grafanaURL, promTarget string, err error)
 	TeardownAll(ctx context.Context, id, ns string, refs dbaasv1.ResourceRefs) error

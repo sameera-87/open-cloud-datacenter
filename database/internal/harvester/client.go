@@ -638,6 +638,10 @@ func (c *Client) TeardownAll(ctx context.Context, id, ns string, refs dbaasv1.Re
 	return nil
 }
 
+// RemoveCloudInitDisk is a no-op on the dynamic client pending implementation.
+// The typed client (default) has the full implementation.
+func (c *Client) RemoveCloudInitDisk(_ context.Context, _, _ string) error { return nil }
+
 // DeleteSecret deletes a Secret, ignoring NotFound. Used by the controller to
 // clean up the ephemeral cloud-init Secret once the VM reaches Available.
 func (c *Client) DeleteSecret(ctx context.Context, ns, name string) error {

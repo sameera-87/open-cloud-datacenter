@@ -372,10 +372,15 @@ func (r *DBInstanceReconciler) phaseAvailable(ctx context.Context, inst *dbaasv1
 	inst.Status.ObservedGeneration = inst.Generation
 	inst.Status.Message = "Database instance is available"
 
-	// On first entry to Available, delete the ephemeral cloud-init Secret so
-	// the installation script and embedded passwords are not left on-cluster.
+	// On first entry to Available, scrub the ephemeral cloud-init Secret.
+	// RemoveCloudInitDisk must succeed first: it patches the VM spec so future
+	// VMI restarts (poweroff → KubeVirt recreates VMI) don't try to mount the
+	// now-absent secret and get stuck with FailedMount on the virt-launcher pod.
+	// If disk removal fails we leave the secret in place and retry next reconcile.
 	if ciName := inst.Status.Resources.CloudInitSecretName; ciName != "" {
-		if delErr := r.Harvester.DeleteSecret(ctx, ns, ciName); delErr != nil {
+		if removeErr := r.Harvester.RemoveCloudInitDisk(ctx, ns, vmName); removeErr != nil {
+			log.FromContext(ctx).Error(removeErr, "failed to remove cloud-init disk from VM spec (will retry)", "vm", vmName)
+		} else if delErr := r.Harvester.DeleteSecret(ctx, ns, ciName); delErr != nil {
 			log.FromContext(ctx).Error(delErr, "failed to delete cloud-init secret (non-fatal)", "secret", ciName)
 		} else {
 			inst.Status.Resources.CloudInitSecretName = ""

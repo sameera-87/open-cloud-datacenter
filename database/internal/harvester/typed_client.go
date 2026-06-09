@@ -214,7 +214,7 @@ func (c *TypedClient) GetVMIReadiness(ctx context.Context, ns, vmName string) (V
 	return readiness, nil
 }
 
-// TODO: research a way to probe postgress health without exposing VM port to pod network
+// TODO: Not used anymore , clean up later from interface and dynamic client
 func (c *TypedClient) DialVMListener(ctx context.Context, ns, vmName string, port int) error {
 	// Dial VM port 5432 using TCP using management pod network
 	list, err := c.KubeClient.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{
@@ -268,6 +268,31 @@ func (c *TypedClient) DeleteSecret(ctx context.Context, ns, name string) error {
 	if apierrors.IsNotFound(err) {
 		return nil
 	}
+	return err
+}
+
+func (c *TypedClient) RemoveCloudInitDisk(ctx context.Context, ns, vmName string) error {
+	vm, err := c.Clientset.KubevirtV1().VirtualMachines(ns).Get(ctx, vmName, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+
+	var disks []kubevirtv1.Disk
+	for _, d := range vm.Spec.Template.Spec.Domain.Devices.Disks {
+		if d.Name != "cloudinit" {
+			disks = append(disks, d)
+		}
+	}
+	var volumes []kubevirtv1.Volume
+	for _, v := range vm.Spec.Template.Spec.Volumes {
+		if v.Name != "cloudinit" {
+			volumes = append(volumes, v)
+		}
+	}
+	vm.Spec.Template.Spec.Domain.Devices.Disks = disks
+	vm.Spec.Template.Spec.Volumes = volumes
+
+	_, err = c.Clientset.KubevirtV1().VirtualMachines(ns).Update(ctx, vm, metav1.UpdateOptions{})
 	return err
 }
 

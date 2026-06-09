@@ -52,7 +52,8 @@ func (s *stubHarvester) DialVMListener(_ context.Context, _, _ string, _ int) er
 func (s *stubHarvester) StopVM(_ context.Context, _, _ string) error                { return s.stopVMErr }
 func (s *stubHarvester) StartVM(_ context.Context, _, _ string) error               { return s.startVMErr }
 func (s *stubHarvester) ResizeVM(_ context.Context, _, _ string, _, _ int) error    { return nil }
-func (s *stubHarvester) DeleteSecret(_ context.Context, _, _ string) error          { return nil }
+func (s *stubHarvester) DeleteSecret(_ context.Context, _, _ string) error             { return nil }
+func (s *stubHarvester) RemoveCloudInitDisk(_ context.Context, _, _ string) error     { return nil }
 func (s *stubHarvester) DeployMonitoring(_ context.Context, _, _, _ string) (string, string, string, string, error) {
 	return "", "", "", "", nil
 }
