@@ -82,9 +82,7 @@ func (c *TypedClient) CreateDataVolume(ctx context.Context, id, ns string, sizeG
 	return dvName, nil
 }
 
-// TODO: validate against harvester repo
-func (c *TypedClient) ResizeDataVolume(ctx context.Context, ns, dvName string, newSizeGB int) error {
-	vmName := vmNameForDataVolumeName(dvName)
+func (c *TypedClient) ResizeDataVolume(ctx context.Context, ns, vmName, dvName string, newSizeGB int) error {
 	vm, err := c.Clientset.KubevirtV1().VirtualMachines(ns).Get(ctx, vmName, metav1.GetOptions{})
 	if err != nil {
 		return err
@@ -443,7 +441,7 @@ func (c *TypedClient) resolveVMImage(ctx context.Context, ref string) (ns, name,
 }
 
 func readyVMImageFields(ns, name string, img *harvesterhciov1beta1.VirtualMachineImage) (string, string, string, error) {
-	if !isVMImageImported(img){
+	if !isVMImageImported(img) {
 		return ns, name, "", fmt.Errorf("VirtualMachineImage %s/%s is not imported yet (status.conditions missing ImageImported=True)", ns, name)
 	}
 	sc, err := resolveImageStorageClassName(img)
@@ -456,22 +454,20 @@ func readyVMImageFields(ns, name string, img *harvesterhciov1beta1.VirtualMachin
 func isVMImageImported(image *harvesterhciov1beta1.VirtualMachineImage) bool {
 	if image == nil {
 		return false
-	}	
-	return  harvesterhciov1beta1.ImageImported.IsTrue(image)
+	}
+	return harvesterhciov1beta1.ImageImported.IsTrue(image)
 }
 
 func resolveImageStorageClassName(image *harvesterhciov1beta1.VirtualMachineImage) (string, error) {
-    if image == nil {
-        return "", fmt.Errorf("nil image")
-    }
-    if image.Status.StorageClassName != "" {
-        return image.Status.StorageClassName, nil
-    }
-    return "", fmt.Errorf("VM image %s/%s does not have a StorageClass yet (not initialized)", 
-        image.Namespace, image.Name)
+	if image == nil {
+		return "", fmt.Errorf("nil image")
+	}
+	if image.Status.StorageClassName != "" {
+		return image.Status.StorageClassName, nil
+	}
+	return "", fmt.Errorf("VM image %s/%s does not have a StorageClass yet (not initialized)",
+		image.Namespace, image.Name)
 }
-
-
 
 func (c *TypedClient) buildPostgresVM(p VMCreateParams, vmName, cloudInitSecretName, imageID, imageSC string, running bool) (*kubevirtv1.VirtualMachine, error) {
 	annotations := map[string]string{}
@@ -508,7 +504,7 @@ func (c *TypedClient) buildPostgresVM(p VMCreateParams, vmName, cloudInitSecretN
 	}
 	dataPVCOption := &harvesterbuilder.PersistentVolumeClaimOption{
 		VolumeMode:       corev1.PersistentVolumeBlock,
-		AccessMode:       corev1.ReadWriteMany,  // to allow live migration all disks should be ReadWriteMany
+		AccessMode:       corev1.ReadWriteMany, // to allow live migration all disks should be ReadWriteMany
 		StorageClassName: &dataStorageClass,
 	}
 
@@ -705,10 +701,6 @@ func typedVolumeClaimTemplates(vm *kubevirtv1.VirtualMachine) ([]*corev1.Persist
 		return nil, fmt.Errorf("unmarshal %s: %w", util.AnnotationVolumeClaimTemplates, err)
 	}
 	return pvcs, nil
-}
-
-func vmNameForDataVolumeName(name string) string {
-	return strings.TrimSuffix(name, "-data")
 }
 
 func mergeStringMap(base map[string]string, overlay map[string]string) map[string]string {

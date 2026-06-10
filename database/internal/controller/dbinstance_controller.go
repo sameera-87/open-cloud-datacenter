@@ -636,7 +636,7 @@ func (r *DBInstanceReconciler) reconcileModify(ctx context.Context, inst *dbaasv
 	if err := r.Harvester.ResizeVM(ctx, ns, vmName, classSpec.CPUCores, classSpec.MemoryMB); err != nil {
 		return r.fail(ctx, inst, "ResizeVMFailed", fmt.Errorf("VM is halted; %w", err))
 	}
-	if err := r.Harvester.ResizeDataVolume(ctx, ns, inst.Status.Resources.DataVolumeName, inst.Spec.AllocatedStorage); err != nil {
+	if err := r.Harvester.ResizeDataVolume(ctx, ns, vmName, inst.Status.Resources.DataVolumeName, inst.Spec.AllocatedStorage); err != nil {
 		return r.fail(ctx, inst, "ResizeStorageFailed", fmt.Errorf("VM is halted; %w", err))
 	}
 

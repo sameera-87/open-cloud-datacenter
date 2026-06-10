@@ -70,7 +70,7 @@ func TestTypedCreateDataVolumeReservesHarvesterDataPVCNameAndResizeUpdatesVMTemp
 		t.Fatalf("Data PVC template storage = %q, want 20Gi", got)
 	}
 
-	if err := client.ResizeDataVolume(ctx, "tenant-a", dvName, 30); err != nil {
+	if err := client.ResizeDataVolume(ctx, "tenant-a", "pg-orders", dvName, 30); err != nil {
 		t.Fatalf("ResizeDataVolume returned error: %v", err)
 	}
 	vm, err = client.Clientset.KubevirtV1().VirtualMachines("tenant-a").Get(ctx, "pg-orders", metav1.GetOptions{})

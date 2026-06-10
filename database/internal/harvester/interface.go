@@ -27,7 +27,7 @@ import (
 // future typed clients.
 type ClientInterface interface {
 	CreateDataVolume(ctx context.Context, id, ns string, sizeGB int, storageClass string) (string, error)
-	ResizeDataVolume(ctx context.Context, ns, dvName string, newSizeGB int) error
+	ResizeDataVolume(ctx context.Context, ns, vmName, dvName string, newSizeGB int) error
 
 	CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName, credSecretName, cloudInitSecretName, caCertPEM string, err error)
 	GetVMIReadiness(ctx context.Context, ns, vmName string) (VMIReadiness, error)

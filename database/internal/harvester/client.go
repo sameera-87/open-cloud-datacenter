@@ -174,7 +174,7 @@ func (c *Client) CreateDataVolume(ctx context.Context, id, ns string, sizeGB int
 	return dvName, nil
 }
 
-func (c *Client) ResizeDataVolume(ctx context.Context, ns, dvName string, newSizeGB int) error {
+func (c *Client) ResizeDataVolume(ctx context.Context, ns, vmName, dvName string, newSizeGB int) error {
 	dv, err := c.Dynamic.Resource(dvGVR).Namespace(ns).Get(ctx, dvName, metav1.GetOptions{})
 	if err != nil {
 		return err

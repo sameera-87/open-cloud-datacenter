@@ -47,7 +47,7 @@ func (s *stubHarvester) GetVMIReadiness(_ context.Context, _, _ string) (harvest
 func (s *stubHarvester) CreateDataVolume(_ context.Context, _, _ string, _ int, _ string) (string, error) {
 	return "", nil
 }
-func (s *stubHarvester) ResizeDataVolume(_ context.Context, _, _ string, _ int) error { return nil }
+func (s *stubHarvester) ResizeDataVolume(_ context.Context, _, _, _ string, _ int) error { return nil }
 func (s *stubHarvester) CreatePostgresVM(_ context.Context, _ harvester.VMCreateParams) (string, string, string, string, error) {
 	return "", "", "", "", nil
 }
@@ -60,9 +60,9 @@ func (s *stubHarvester) StartVM(_ context.Context, _, _ string) error {
 	s.StartVMCalls++
 	return s.startVMErr
 }
-func (s *stubHarvester) ResizeVM(_ context.Context, _, _ string, _, _ int) error    { return nil }
-func (s *stubHarvester) DeleteSecret(_ context.Context, _, _ string) error             { return nil }
-func (s *stubHarvester) RemoveCloudInitDisk(_ context.Context, _, _ string) error     { return nil }
+func (s *stubHarvester) ResizeVM(_ context.Context, _, _ string, _, _ int) error  { return nil }
+func (s *stubHarvester) DeleteSecret(_ context.Context, _, _ string) error        { return nil }
+func (s *stubHarvester) RemoveCloudInitDisk(_ context.Context, _, _ string) error { return nil }
 func (s *stubHarvester) DeployMonitoring(_ context.Context, _, _, _ string) (string, string, string, string, error) {
 	return "", "", "", "", nil
 }
