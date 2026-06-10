@@ -302,28 +302,30 @@ func (c *TypedClient) DeleteSecret(ctx context.Context, ns, name string) error {
 }
 
 func (c *TypedClient) RemoveCloudInitDisk(ctx context.Context, ns, vmName string) error {
-	vm, err := c.Clientset.KubevirtV1().VirtualMachines(ns).Get(ctx, vmName, metav1.GetOptions{})
-	if err != nil {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		vm, err := c.Clientset.KubevirtV1().VirtualMachines(ns).Get(ctx, vmName, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+
+		var disks []kubevirtv1.Disk
+		for _, d := range vm.Spec.Template.Spec.Domain.Devices.Disks {
+			if d.Name != "cloudinit" {
+				disks = append(disks, d)
+			}
+		}
+		var volumes []kubevirtv1.Volume
+		for _, v := range vm.Spec.Template.Spec.Volumes {
+			if v.Name != "cloudinit" {
+				volumes = append(volumes, v)
+			}
+		}
+		vm.Spec.Template.Spec.Domain.Devices.Disks = disks
+		vm.Spec.Template.Spec.Volumes = volumes
+
+		_, err = c.Clientset.KubevirtV1().VirtualMachines(ns).Update(ctx, vm, metav1.UpdateOptions{})
 		return err
-	}
-
-	var disks []kubevirtv1.Disk
-	for _, d := range vm.Spec.Template.Spec.Domain.Devices.Disks {
-		if d.Name != "cloudinit" {
-			disks = append(disks, d)
-		}
-	}
-	var volumes []kubevirtv1.Volume
-	for _, v := range vm.Spec.Template.Spec.Volumes {
-		if v.Name != "cloudinit" {
-			volumes = append(volumes, v)
-		}
-	}
-	vm.Spec.Template.Spec.Domain.Devices.Disks = disks
-	vm.Spec.Template.Spec.Volumes = volumes
-
-	_, err = c.Clientset.KubevirtV1().VirtualMachines(ns).Update(ctx, vm, metav1.UpdateOptions{})
-	return err
+	})
 }
 
 func (c *TypedClient) DeployMonitoring(ctx context.Context, id, ns, vmIP string) (svcName, smName, grafanaURL, promTarget string, err error) {
