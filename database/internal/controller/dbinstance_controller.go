@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -120,8 +121,9 @@ func (r *DBInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return r.reconcileStart(ctx, &inst)
 	}
 
-	// --- Handle spec changes on available instance ---
-	if inst.Status.Phase == dbaasv1.StatusAvailable && inst.Generation != inst.Status.ObservedGeneration {
+	// --- Handle spec changes on available or in-progress-modifying instance ---
+	if (inst.Status.Phase == dbaasv1.StatusAvailable || inst.Status.Phase == dbaasv1.StatusModifying) &&
+		inst.Generation != inst.Status.ObservedGeneration {
 		return r.reconcileModify(ctx, &inst)
 	}
 
@@ -628,9 +630,24 @@ func (r *DBInstanceReconciler) reconcileModify(ctx context.Context, inst *dbaasv
 
 	vmName := inst.Status.Resources.VMName
 
-	// Cold resize: VM must be stopped before applying CPU/memory changes.
+	// Cold resize: ensure VM is halted (idempotent — safe to call on an already-halted VM).
 	if err := r.Harvester.StopVM(ctx, ns, vmName); err != nil {
 		return r.fail(ctx, inst, "ResizeStopFailed", err)
+	}
+
+	// Wait for the VMI to actually terminate before applying spec changes.
+	// Setting RunStrategy=Halted is asynchronous: the VMI can take 5–30s to
+	// stop. KubeVirt's start subresource rejects calls while a VMI object
+	// exists. StopVM is idempotent so re-calling on each re-queue is safe.
+	readiness, vmiErr := r.Harvester.GetVMIReadiness(ctx, ns, vmName)
+	if vmiErr != nil && !errors.IsNotFound(vmiErr) {
+		// Transient API error — re-queue without failing.
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	}
+	if readiness.Running {
+		inst.Status.Phase = dbaasv1.StatusModifying
+		inst.Status.Message = fmt.Sprintf("Waiting for VM to stop before resize to %s", inst.Spec.DBInstanceClass)
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, r.statusUpdate(ctx, inst)
 	}
 
 	if err := r.Harvester.ResizeVM(ctx, ns, vmName, classSpec.CPUCores, classSpec.MemoryMB); err != nil {
@@ -769,11 +786,23 @@ func (r *DBInstanceReconciler) fail(ctx context.Context, inst *dbaasv1.DBInstanc
 	inst.Status.ProvisioningPhase = dbaasv1.PhaseFailed
 	inst.Status.Message = fmt.Sprintf("%s: %v", reason, err)
 	_ = r.statusUpdate(ctx, inst)
-	return ctrl.Result{RequeueAfter: 30 * time.Second}, err
+	// Return zero Result: controller-runtime ignores Result when error is
+	// non-nil and applies exponential backoff requeue instead.
+	return ctrl.Result{}, err
 }
 
 func (r *DBInstanceReconciler) statusUpdate(ctx context.Context, inst *dbaasv1.DBInstance) error {
-	return r.Status().Update(ctx, inst)
+	desired := inst.Status.DeepCopy()
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		// Re-fetch on every attempt to get a current resourceVersion.
+		// The informer cache typically reflects writes within a few hundred ms;
+		// DefaultRetry's backoff (10ms → 160ms, 5 attempts) covers that window.
+		if err := r.Get(ctx, client.ObjectKeyFromObject(inst), inst); err != nil {
+			return err
+		}
+		inst.Status = *desired
+		return r.Status().Update(ctx, inst)
+	})
 }
 
 // specPort returns 5432 if port is 0, otherwise port.
