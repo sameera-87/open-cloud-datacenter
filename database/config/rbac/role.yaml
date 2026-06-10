@@ -95,3 +95,11 @@ rules:
   - delete
   - get
   - update
+- apiGroups:
+  - subresources.kubevirt.io
+  resources:
+  - virtualmachines/restart
+  - virtualmachines/start
+  - virtualmachines/stop
+  verbs:
+  - update

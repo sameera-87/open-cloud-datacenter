@@ -31,11 +31,14 @@ import (
 
 // stubHarvester satisfies harvester.ClientInterface for controller unit tests.
 // Set the exported error fields to inject failures into specific methods.
+// StopVMCalls and StartVMCalls count how many times each method was called.
 type stubHarvester struct {
 	readiness    harvester.VMIReadiness
 	readinessErr error
 	stopVMErr    error
 	startVMErr   error
+	StopVMCalls  int
+	StartVMCalls int
 }
 
 func (s *stubHarvester) GetVMIReadiness(_ context.Context, _, _ string) (harvester.VMIReadiness, error) {
@@ -49,8 +52,14 @@ func (s *stubHarvester) CreatePostgresVM(_ context.Context, _ harvester.VMCreate
 	return "", "", "", "", nil
 }
 func (s *stubHarvester) DialVMListener(_ context.Context, _, _ string, _ int) error { return nil }
-func (s *stubHarvester) StopVM(_ context.Context, _, _ string) error                { return s.stopVMErr }
-func (s *stubHarvester) StartVM(_ context.Context, _, _ string) error               { return s.startVMErr }
+func (s *stubHarvester) StopVM(_ context.Context, _, _ string) error {
+	s.StopVMCalls++
+	return s.stopVMErr
+}
+func (s *stubHarvester) StartVM(_ context.Context, _, _ string) error {
+	s.StartVMCalls++
+	return s.startVMErr
+}
 func (s *stubHarvester) ResizeVM(_ context.Context, _, _ string, _, _ int) error    { return nil }
 func (s *stubHarvester) DeleteSecret(_ context.Context, _, _ string) error             { return nil }
 func (s *stubHarvester) RemoveCloudInitDisk(_ context.Context, _, _ string) error     { return nil }

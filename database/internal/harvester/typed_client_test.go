@@ -17,6 +17,7 @@ import (
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	clienttesting "k8s.io/client-go/testing"
 	kubevirtv1 "kubevirt.io/api/core/v1"
+	kvfake "kubevirt.io/client-go/kubevirt/fake"
 )
 
 func TestTypedCreatePostgresVMDoesNotCreateSecretWhenImageResolutionFails(t *testing.T) {
@@ -329,12 +330,12 @@ func TestTypedGetVMIReadinessConditionsDefaultToFalseWhenAbsent(t *testing.T) {
 
 func TestTypedStartStopAndResizeVM(t *testing.T) {
 	ctx := context.Background()
-	running := true
+	runStrategy := kubevirtv1.RunStrategyRerunOnFailure
 	client := newTestTypedClient(&kubevirtv1.VirtualMachine{
 		TypeMeta:   metav1.TypeMeta{APIVersion: "kubevirt.io/v1", Kind: "VirtualMachine"},
 		ObjectMeta: metav1.ObjectMeta{Name: "pg-orders", Namespace: "tenant-a"},
 		Spec: kubevirtv1.VirtualMachineSpec{
-			Running: &running,
+			RunStrategy: &runStrategy,
 			Template: &kubevirtv1.VirtualMachineInstanceTemplateSpec{
 				Spec: kubevirtv1.VirtualMachineInstanceSpec{
 					Domain: kubevirtv1.DomainSpec{
@@ -346,23 +347,27 @@ func TestTypedStartStopAndResizeVM(t *testing.T) {
 		},
 	})
 
+	// StopVM: sets RunStrategy = Halted (spec mutation, matches Harvester's stop pattern)
 	if err := client.StopVM(ctx, "tenant-a", "pg-orders"); err != nil {
 		t.Fatalf("StopVM returned error: %v", err)
 	}
 	vm, _ := client.Clientset.KubevirtV1().VirtualMachines("tenant-a").Get(ctx, "pg-orders", metav1.GetOptions{})
-	if vm.Spec.Running == nil || *vm.Spec.Running {
-		t.Fatalf("running after StopVM = %v, want false", vm.Spec.Running)
+	if vm.Spec.RunStrategy == nil || *vm.Spec.RunStrategy != kubevirtv1.RunStrategyHalted {
+		t.Fatalf("RunStrategy after StopVM = %v, want Halted", vm.Spec.RunStrategy)
 	}
+	if vm.Spec.Running != nil {
+		t.Fatalf("Running after StopVM = %v, want nil", vm.Spec.Running)
+	}
+
+	// StartVM: calls the KubeVirt start subresource API (does not mutate spec)
 	if err := client.StartVM(ctx, "tenant-a", "pg-orders"); err != nil {
 		t.Fatalf("StartVM returned error: %v", err)
 	}
+
 	if err := client.ResizeVM(ctx, "tenant-a", "pg-orders", 4, 8192); err != nil {
 		t.Fatalf("ResizeVM returned error: %v", err)
 	}
 	vm, _ = client.Clientset.KubevirtV1().VirtualMachines("tenant-a").Get(ctx, "pg-orders", metav1.GetOptions{})
-	if vm.Spec.Running == nil || !*vm.Spec.Running {
-		t.Fatalf("running after StartVM = %v, want true", vm.Spec.Running)
-	}
 	if vm.Spec.Template.Spec.Domain.CPU.Cores != 4 || vm.Spec.Template.Spec.Domain.Memory.Guest.String() != "8Gi" {
 		t.Fatalf("resized CPU/memory = %d/%s, want 4/8Gi", vm.Spec.Template.Spec.Domain.CPU.Cores, vm.Spec.Template.Spec.Domain.Memory.Guest.String())
 	}
@@ -529,7 +534,7 @@ func TestTypedTeardownAggregatesDeleteErrors(t *testing.T) {
 }
 
 func newTestTypedClient(objs ...runtime.Object) *TypedClient {
-	return NewTypedClientWithClientsets(harvesterfake.NewSimpleClientset(objs...), kubefake.NewSimpleClientset(), "")
+	return NewTypedClientWithClientsets(harvesterfake.NewSimpleClientset(objs...), kubefake.NewSimpleClientset(), kvfake.NewSimpleClientset(), "")
 }
 
 func findPVCTemplate(pvcs []*corev1.PersistentVolumeClaim, name string) *corev1.PersistentVolumeClaim {

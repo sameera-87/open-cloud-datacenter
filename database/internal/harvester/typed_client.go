@@ -39,6 +39,7 @@ import (
 
 	harvesterhciov1beta1 "github.com/harvester/harvester/pkg/apis/harvesterhci.io/v1beta1"
 	harvesterclientset "github.com/harvester/harvester/pkg/generated/clientset/versioned"
+	kvclientset "kubevirt.io/client-go/kubevirt"
 )
 
 // TypedClient manages Harvester resources through Harvester's generated
@@ -46,6 +47,7 @@ import (
 type TypedClient struct {
 	Clientset         harvesterclientset.Interface
 	KubeClient        kubernetes.Interface
+	KvClientset       kvclientset.Interface
 	GrafanaURL        string
 	MgmtLogicalSwitch string
 }
@@ -61,11 +63,15 @@ func NewTypedClient(config *rest.Config, grafanaURL string) (*TypedClient, error
 	if err != nil {
 		return nil, err
 	}
-	return NewTypedClientWithClientsets(clientset, kubeClient, grafanaURL), nil
+	kvClientset, err := kvclientset.NewForConfig(config)
+	if err != nil {
+		return nil, err
+	}
+	return NewTypedClientWithClientsets(clientset, kubeClient, kvClientset, grafanaURL), nil
 }
 
-func NewTypedClientWithClientsets(clientset harvesterclientset.Interface, kubeClient kubernetes.Interface, grafanaURL string) *TypedClient {
-	return &TypedClient{Clientset: clientset, KubeClient: kubeClient, GrafanaURL: grafanaURL}
+func NewTypedClientWithClientsets(clientset harvesterclientset.Interface, kubeClient kubernetes.Interface, kvClientset kvclientset.Interface, grafanaURL string) *TypedClient {
+	return &TypedClient{Clientset: clientset, KubeClient: kubeClient, KvClientset: kvClientset, GrafanaURL: grafanaURL}
 }
 
 func (c *TypedClient) CreateDataVolume(ctx context.Context, id, ns string, sizeGB int, storageClass string) (string, error) {
@@ -243,12 +249,23 @@ func (c *TypedClient) DialVMListener(ctx context.Context, ns, vmName string, por
 	return nil
 }
 
+// To align behavior with kubevirt v1.1.1, we set runStrategy to Halted when stopping a VM.
+// see harvester/pkg/api/vm/handler.go 142
 func (c *TypedClient) StopVM(ctx context.Context, ns, vmName string) error {
-	return c.setVMRunning(ctx, ns, vmName, false)
+	vm, err := c.Clientset.KubevirtV1().VirtualMachines(ns).Get(ctx, vmName, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	runStrategy := kubevirtv1.RunStrategyHalted
+	vm.Spec.RunStrategy = &runStrategy
+	vm.Spec.Running = nil
+	_, err = c.Clientset.KubevirtV1().VirtualMachines(ns).Update(ctx, vm, metav1.UpdateOptions{})
+	return err
 }
 
+// see harvester/pkg/api/vm/handler.go 138
 func (c *TypedClient) StartVM(ctx context.Context, ns, vmName string) error {
-	return c.setVMRunning(ctx, ns, vmName, true)
+	return c.KvClientset.KubevirtV1().VirtualMachines(ns).Start(ctx, vmName, &kubevirtv1.StartOptions{})
 }
 
 func (c *TypedClient) ResizeVM(ctx context.Context, ns, vmName string, cpuCores, memoryMB int) error {
@@ -447,24 +464,6 @@ func resolveImageStorageClassName(image *harvesterhciov1beta1.VirtualMachineImag
 }
 
 
-func (c *TypedClient) setVMRunning(ctx context.Context, ns, vmName string, running bool) error {
-	vm, err := c.Clientset.KubevirtV1().VirtualMachines(ns).Get(ctx, vmName, metav1.GetOptions{})
-	if err != nil {
-		return err
-	}
-	if vm.Spec.RunStrategy != nil {
-		runStrategy := kubevirtv1.RunStrategyHalted
-		if running {
-			runStrategy = kubevirtv1.RunStrategyRerunOnFailure
-		}
-		vm.Spec.RunStrategy = &runStrategy
-		vm.Spec.Running = nil // deprecated in favor of RunStrategy in KubeVirt
-	} else {
-		vm.Spec.Running = ptr(running) // for compatibility with older kubevirt versions
-	}
-	_, err = c.Clientset.KubevirtV1().VirtualMachines(ns).Update(ctx, vm, metav1.UpdateOptions{})
-	return err
-}
 
 func (c *TypedClient) buildPostgresVM(p VMCreateParams, vmName, cloudInitSecretName, imageID, imageSC string, running bool) (*kubevirtv1.VirtualMachine, error) {
 	annotations := map[string]string{}
