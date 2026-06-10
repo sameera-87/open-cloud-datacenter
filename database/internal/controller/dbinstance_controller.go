@@ -20,7 +20,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -461,6 +460,7 @@ func (r *DBInstanceReconciler) phaseAvailable(ctx context.Context, inst *dbaasv1
 					dbaasv1.ReasonMaxRestartsExceeded, termMsg)
 				removeCondition(inst, dbaasv1.ConditionDegraded)
 				inst.Status.Phase = dbaasv1.StatusFailed
+				//TODO:inst.Status.ProvisioningPhase = dbaasv1.PhaseFailed  check the implication of this
 				inst.Status.Message = termMsg
 				_ = r.statusUpdate(ctx, inst)
 				return ctrl.Result{}, nil // stop requeuing; requires manual intervention , controller phaseFailed reque after every 30 seconds
@@ -626,30 +626,30 @@ func (r *DBInstanceReconciler) reconcileModify(ctx context.Context, inst *dbaasv
 		return r.fail(ctx, inst, "InvalidClass", fmt.Errorf("unknown class: %s", inst.Spec.DBInstanceClass))
 	}
 
-	var wg sync.WaitGroup
-	var vmErr, dvErr error
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		vmErr = r.Harvester.ResizeVM(ctx, ns, inst.Status.Resources.VMName, classSpec.CPUCores, classSpec.MemoryMB)
-	}()
-	go func() {
-		defer wg.Done()
-		dvErr = r.Harvester.ResizeDataVolume(ctx, ns, inst.Status.Resources.DataVolumeName, inst.Spec.AllocatedStorage)
-	}()
-	wg.Wait()
+	vmName := inst.Status.Resources.VMName
 
-	if vmErr != nil {
-		return r.fail(ctx, inst, "ResizeVMFailed", vmErr)
-	}
-	if dvErr != nil {
-		return r.fail(ctx, inst, "ResizeStorageFailed", dvErr)
+	// Cold resize: VM must be stopped before applying CPU/memory changes.
+	if err := r.Harvester.StopVM(ctx, ns, vmName); err != nil {
+		return r.fail(ctx, inst, "ResizeStopFailed", err)
 	}
 
-	inst.Status.Phase = dbaasv1.StatusAvailable
-	inst.Status.Message = fmt.Sprintf("Resized to %s, %dGiB", inst.Spec.DBInstanceClass, inst.Spec.AllocatedStorage)
+	if err := r.Harvester.ResizeVM(ctx, ns, vmName, classSpec.CPUCores, classSpec.MemoryMB); err != nil {
+		return r.fail(ctx, inst, "ResizeVMFailed", fmt.Errorf("VM is halted; %w", err))
+	}
+	if err := r.Harvester.ResizeDataVolume(ctx, ns, inst.Status.Resources.DataVolumeName, inst.Spec.AllocatedStorage); err != nil {
+		return r.fail(ctx, inst, "ResizeStorageFailed", fmt.Errorf("VM is halted; %w", err))
+	}
+
+	if err := r.Harvester.StartVM(ctx, ns, vmName); err != nil {
+		return r.fail(ctx, inst, "ResizeStartFailed", fmt.Errorf("resize applied but VM failed to start; %w", err))
+	}
+
+	// Wait for the VM to become ready via the normal provisioning path.
 	inst.Status.ObservedGeneration = inst.Generation
-	return ctrl.Result{}, r.statusUpdate(ctx, inst)
+	inst.Status.LastKnownVMIUID = ""
+	inst.Status.ProvisioningPhase = dbaasv1.PhaseVMCreated
+	inst.Status.Message = fmt.Sprintf("Resized to %s, %dGiB; waiting for VM", inst.Spec.DBInstanceClass, inst.Spec.AllocatedStorage)
+	return ctrl.Result{RequeueAfter: 10 * time.Second}, r.statusUpdate(ctx, inst)
 }
 
 // immutableDrift returns a comma-separated list of immutable spec fields

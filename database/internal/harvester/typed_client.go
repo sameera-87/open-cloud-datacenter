@@ -269,13 +269,21 @@ func (c *TypedClient) StartVM(ctx context.Context, ns, vmName string) error {
 }
 
 func (c *TypedClient) ResizeVM(ctx context.Context, ns, vmName string, cpuCores, memoryMB int) error {
-	// TODO: cold vs hot resize should be decided first. Real hardware boost comes from cold resize.
 	vm, err := c.Clientset.KubevirtV1().VirtualMachines(ns).Get(ctx, vmName, metav1.GetOptions{})
 	if err != nil {
 		return err
 	}
+	if vm.Spec.Template.Spec.Domain.CPU == nil {
+		vm.Spec.Template.Spec.Domain.CPU = &kubevirtv1.CPU{}
+	}
 	vm.Spec.Template.Spec.Domain.CPU.Cores = uint32(cpuCores)
-	vm.Spec.Template.Spec.Domain.Memory.Guest = ptr(resource.MustParse(fmt.Sprintf("%dMi", memoryMB)))
+	if vm.Spec.Template.Spec.Domain.Resources.Limits == nil {
+		vm.Spec.Template.Spec.Domain.Resources.Limits = corev1.ResourceList{}
+	}
+	vm.Spec.Template.Spec.Domain.Resources.Limits[corev1.ResourceCPU] = *resource.NewQuantity(int64(cpuCores), resource.DecimalSI)
+	// Memory: set limits only — the Harvester mutating webhook derives domain.memory.guest
+	// from resources.limits[memory] on every VM update (pkg/webhook/.../mutator.go).
+	vm.Spec.Template.Spec.Domain.Resources.Limits[corev1.ResourceMemory] = resource.MustParse(fmt.Sprintf("%dMi", memoryMB))
 	_, err = c.Clientset.KubevirtV1().VirtualMachines(ns).Update(ctx, vm, metav1.UpdateOptions{})
 	return err
 }

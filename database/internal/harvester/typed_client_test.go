@@ -12,6 +12,7 @@ import (
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	kubefake "k8s.io/client-go/kubernetes/fake"
@@ -368,8 +369,11 @@ func TestTypedStartStopAndResizeVM(t *testing.T) {
 		t.Fatalf("ResizeVM returned error: %v", err)
 	}
 	vm, _ = client.Clientset.KubevirtV1().VirtualMachines("tenant-a").Get(ctx, "pg-orders", metav1.GetOptions{})
-	if vm.Spec.Template.Spec.Domain.CPU.Cores != 4 || vm.Spec.Template.Spec.Domain.Memory.Guest.String() != "8Gi" {
-		t.Fatalf("resized CPU/memory = %d/%s, want 4/8Gi", vm.Spec.Template.Spec.Domain.CPU.Cores, vm.Spec.Template.Spec.Domain.Memory.Guest.String())
+	cpuLimit := vm.Spec.Template.Spec.Domain.Resources.Limits[corev1.ResourceCPU]
+	memLimit := vm.Spec.Template.Spec.Domain.Resources.Limits[corev1.ResourceMemory]
+	if vm.Spec.Template.Spec.Domain.CPU.Cores != 4 || cpuLimit.Cmp(*resource.NewQuantity(4, resource.DecimalSI)) != 0 || memLimit.Cmp(resource.MustParse("8192Mi")) != 0 {
+		t.Fatalf("resized CPU/memory = cores:%d cpuLimit:%s memLimit:%s, want cores:4 cpuLimit:4 memLimit:8192Mi",
+			vm.Spec.Template.Spec.Domain.CPU.Cores, cpuLimit.String(), memLimit.String())
 	}
 }
 
