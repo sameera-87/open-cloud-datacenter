@@ -35,6 +35,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/util/retry"
 	kubevirtv1 "kubevirt.io/api/core/v1"
 
 	harvesterhciov1beta1 "github.com/harvester/harvester/pkg/apis/harvesterhci.io/v1beta1"
@@ -83,39 +84,41 @@ func (c *TypedClient) CreateDataVolume(ctx context.Context, id, ns string, sizeG
 }
 
 func (c *TypedClient) ResizeDataVolume(ctx context.Context, ns, vmName, dvName string, newSizeGB int) error {
-	vm, err := c.Clientset.KubevirtV1().VirtualMachines(ns).Get(ctx, vmName, metav1.GetOptions{})
-	if err != nil {
-		return err
-	}
-	pvcs, err := typedVolumeClaimTemplates(vm)
-	if err != nil {
-		return err
-	}
-	found := false
-	for _, pvc := range pvcs {
-		if pvc.Name != dvName {
-			continue
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		vm, err := c.Clientset.KubevirtV1().VirtualMachines(ns).Get(ctx, vmName, metav1.GetOptions{})
+		if err != nil {
+			return err
 		}
-		if pvc.Spec.Resources.Requests == nil {
-			pvc.Spec.Resources.Requests = corev1.ResourceList{}
+		pvcs, err := typedVolumeClaimTemplates(vm)
+		if err != nil {
+			return err
 		}
-		pvc.Spec.Resources.Requests[corev1.ResourceStorage] = resource.MustParse(fmt.Sprintf("%dGi", newSizeGB))
-		found = true
-		break
-	}
-	if !found {
-		return fmt.Errorf("data volume claim template %s not found on VM %s/%s", dvName, ns, vmName)
-	}
-	data, err := json.Marshal(pvcs)
-	if err != nil {
-		return fmt.Errorf("marshal %s: %w", util.AnnotationVolumeClaimTemplates, err)
-	}
-	if vm.Annotations == nil {
-		vm.Annotations = map[string]string{}
-	}
-	vm.Annotations[util.AnnotationVolumeClaimTemplates] = string(data)
-	_, err = c.Clientset.KubevirtV1().VirtualMachines(ns).Update(ctx, vm, metav1.UpdateOptions{})
-	return err
+		found := false
+		for _, pvc := range pvcs {
+			if pvc.Name != dvName {
+				continue
+			}
+			if pvc.Spec.Resources.Requests == nil {
+				pvc.Spec.Resources.Requests = corev1.ResourceList{}
+			}
+			pvc.Spec.Resources.Requests[corev1.ResourceStorage] = resource.MustParse(fmt.Sprintf("%dGi", newSizeGB))
+			found = true
+			break
+		}
+		if !found {
+			return fmt.Errorf("data volume claim template %s not found on VM %s/%s", dvName, ns, vmName)
+		}
+		data, err := json.Marshal(pvcs)
+		if err != nil {
+			return fmt.Errorf("marshal %s: %w", util.AnnotationVolumeClaimTemplates, err)
+		}
+		if vm.Annotations == nil {
+			vm.Annotations = map[string]string{}
+		}
+		vm.Annotations[util.AnnotationVolumeClaimTemplates] = string(data)
+		_, err = c.Clientset.KubevirtV1().VirtualMachines(ns).Update(ctx, vm, metav1.UpdateOptions{})
+		return err
+	})
 }
 
 func (c *TypedClient) CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName, credSecretName, cloudInitSecretName, caCertPEM string, err error) {
@@ -250,15 +253,17 @@ func (c *TypedClient) DialVMListener(ctx context.Context, ns, vmName string, por
 // To align behavior with kubevirt v1.1.1, we set runStrategy to Halted when stopping a VM.
 // see harvester/pkg/api/vm/handler.go 142
 func (c *TypedClient) StopVM(ctx context.Context, ns, vmName string) error {
-	vm, err := c.Clientset.KubevirtV1().VirtualMachines(ns).Get(ctx, vmName, metav1.GetOptions{})
-	if err != nil {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		vm, err := c.Clientset.KubevirtV1().VirtualMachines(ns).Get(ctx, vmName, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		runStrategy := kubevirtv1.RunStrategyHalted
+		vm.Spec.RunStrategy = &runStrategy
+		vm.Spec.Running = nil
+		_, err = c.Clientset.KubevirtV1().VirtualMachines(ns).Update(ctx, vm, metav1.UpdateOptions{})
 		return err
-	}
-	runStrategy := kubevirtv1.RunStrategyHalted
-	vm.Spec.RunStrategy = &runStrategy
-	vm.Spec.Running = nil
-	_, err = c.Clientset.KubevirtV1().VirtualMachines(ns).Update(ctx, vm, metav1.UpdateOptions{})
-	return err
+	})
 }
 
 // see harvester/pkg/api/vm/handler.go 138
@@ -267,23 +272,25 @@ func (c *TypedClient) StartVM(ctx context.Context, ns, vmName string) error {
 }
 
 func (c *TypedClient) ResizeVM(ctx context.Context, ns, vmName string, cpuCores, memoryMB int) error {
-	vm, err := c.Clientset.KubevirtV1().VirtualMachines(ns).Get(ctx, vmName, metav1.GetOptions{})
-	if err != nil {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		vm, err := c.Clientset.KubevirtV1().VirtualMachines(ns).Get(ctx, vmName, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		if vm.Spec.Template.Spec.Domain.CPU == nil {
+			vm.Spec.Template.Spec.Domain.CPU = &kubevirtv1.CPU{}
+		}
+		vm.Spec.Template.Spec.Domain.CPU.Cores = uint32(cpuCores)
+		if vm.Spec.Template.Spec.Domain.Resources.Limits == nil {
+			vm.Spec.Template.Spec.Domain.Resources.Limits = corev1.ResourceList{}
+		}
+		vm.Spec.Template.Spec.Domain.Resources.Limits[corev1.ResourceCPU] = *resource.NewQuantity(int64(cpuCores), resource.DecimalSI)
+		// Memory: set limits only — the Harvester mutating webhook derives domain.memory.guest
+		// from resources.limits[memory] on every VM update (pkg/webhook/.../mutator.go).
+		vm.Spec.Template.Spec.Domain.Resources.Limits[corev1.ResourceMemory] = resource.MustParse(fmt.Sprintf("%dMi", memoryMB))
+		_, err = c.Clientset.KubevirtV1().VirtualMachines(ns).Update(ctx, vm, metav1.UpdateOptions{})
 		return err
-	}
-	if vm.Spec.Template.Spec.Domain.CPU == nil {
-		vm.Spec.Template.Spec.Domain.CPU = &kubevirtv1.CPU{}
-	}
-	vm.Spec.Template.Spec.Domain.CPU.Cores = uint32(cpuCores)
-	if vm.Spec.Template.Spec.Domain.Resources.Limits == nil {
-		vm.Spec.Template.Spec.Domain.Resources.Limits = corev1.ResourceList{}
-	}
-	vm.Spec.Template.Spec.Domain.Resources.Limits[corev1.ResourceCPU] = *resource.NewQuantity(int64(cpuCores), resource.DecimalSI)
-	// Memory: set limits only — the Harvester mutating webhook derives domain.memory.guest
-	// from resources.limits[memory] on every VM update (pkg/webhook/.../mutator.go).
-	vm.Spec.Template.Spec.Domain.Resources.Limits[corev1.ResourceMemory] = resource.MustParse(fmt.Sprintf("%dMi", memoryMB))
-	_, err = c.Clientset.KubevirtV1().VirtualMachines(ns).Update(ctx, vm, metav1.UpdateOptions{})
-	return err
+	})
 }
 
 func (c *TypedClient) DeleteSecret(ctx context.Context, ns, name string) error {
