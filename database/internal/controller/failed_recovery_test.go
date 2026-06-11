@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -172,6 +173,82 @@ func TestPhaseFailedRecoversWhenHealthy(t *testing.T) {
 	}
 	if hasCondition(inst, dbaasv1.ConditionFailed) {
 		t.Fatalf("ConditionFailed still present after recovery")
+	}
+}
+
+// TestCrashLoopHaltsAndFailsAtThreshold is the KI-006 Problem A regression:
+// under RunStrategyAlways, KubeVirt auto-recovers a crash-looping VM forever
+// and the episode guard never fires. A chain of crashLoopThreshold unplanned
+// restarts (UID changes), each within crashLoopWindow, must halt the VM and
+// set phase=failed + provisioningPhase=Failed.
+func TestCrashLoopHaltsAndFailsAtThreshold(t *testing.T) {
+	stub := &stubHarvester{
+		readiness: harvester.VMIReadiness{Running: true, Ready: true, AgentConnected: true, VMIUID: "vmi-uid-abc"},
+	}
+	r, inst := newAvailableReconciler(stub)
+	ctx := context.Background()
+
+	// Each cycle KubeVirt has recreated the VMI: new UID every pass.
+	for i := 1; i <= crashLoopThreshold; i++ {
+		stub.readiness.VMIUID = fmt.Sprintf("vmi-uid-crash-%d", i)
+		if _, err := r.phaseAvailable(ctx, inst); err != nil {
+			t.Fatalf("cycle %d error: %v", i, err)
+		}
+		if i < crashLoopThreshold {
+			if inst.Status.Phase == dbaasv1.StatusFailed {
+				t.Fatalf("cycle %d: failed before threshold", i)
+			}
+			if inst.Status.RecentUnplannedRestarts != i {
+				t.Fatalf("cycle %d: RecentUnplannedRestarts = %d, want %d", i, inst.Status.RecentUnplannedRestarts, i)
+			}
+			if inst.Status.ProvisioningPhase != dbaasv1.PhaseVMCreated {
+				t.Fatalf("cycle %d: ProvisioningPhase = %q, want %q (normal restart absorb)", i, inst.Status.ProvisioningPhase, dbaasv1.PhaseVMCreated)
+			}
+		}
+	}
+
+	if inst.Status.Phase != dbaasv1.StatusFailed {
+		t.Fatalf("Phase = %q after %d chained unplanned restarts, want %q", inst.Status.Phase, crashLoopThreshold, dbaasv1.StatusFailed)
+	}
+	if inst.Status.ProvisioningPhase != dbaasv1.PhaseFailed {
+		t.Fatalf("ProvisioningPhase = %q, want %q", inst.Status.ProvisioningPhase, dbaasv1.PhaseFailed)
+	}
+	if stub.StopVMCalls != 1 {
+		t.Fatalf("StopVM called %d times, want 1 (crash-looping VM must be halted, not left to KubeVirt)", stub.StopVMCalls)
+	}
+	if stub.StartVMCalls != 0 {
+		t.Fatalf("StartVM called %d times, want 0", stub.StartVMCalls)
+	}
+	if !hasCondition(inst, dbaasv1.ConditionFailed) {
+		t.Fatalf("ConditionFailed not set")
+	}
+}
+
+// TestCrashLoopChainResetsAfterQuietGap verifies the window decay: an
+// unplanned restart arriving after more than crashLoopWindow of quiet starts
+// a fresh chain instead of extending the old one.
+func TestCrashLoopChainResetsAfterQuietGap(t *testing.T) {
+	stub := &stubHarvester{
+		readiness: harvester.VMIReadiness{Running: true, Ready: true, AgentConnected: true, VMIUID: "vmi-uid-new"},
+	}
+	r, inst := newAvailableReconciler(stub)
+	// Two chained restarts happened, but the last one was before the window.
+	stale := metav1.NewTime(time.Now().Add(-crashLoopWindow - time.Minute))
+	inst.Status.RecentUnplannedRestarts = crashLoopThreshold - 1
+	inst.Status.LastUnplannedRestartTime = &stale
+	ctx := context.Background()
+
+	if _, err := r.phaseAvailable(ctx, inst); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if inst.Status.RecentUnplannedRestarts != 1 {
+		t.Fatalf("RecentUnplannedRestarts = %d, want 1 (chain must reset after quiet gap)", inst.Status.RecentUnplannedRestarts)
+	}
+	if inst.Status.Phase == dbaasv1.StatusFailed {
+		t.Fatalf("instance failed despite the chain being broken by a quiet gap")
+	}
+	if stub.StopVMCalls != 0 {
+		t.Fatalf("StopVM called %d times, want 0", stub.StopVMCalls)
 	}
 }
 

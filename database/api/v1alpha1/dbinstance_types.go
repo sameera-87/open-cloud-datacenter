@@ -322,6 +322,17 @@ type DBInstanceStatus struct {
 	// reflects the current episode rather than lifetime history.
 	// +optional
 	ConsecutiveRestartAttempts int `json:"consecutiveRestartAttempts,omitempty"`
+	// LastUnplannedRestartTime is when the controller last observed an
+	// unplanned VMI restart (UID change). Input to crash-loop detection.
+	// +optional
+	LastUnplannedRestartTime *metav1.Time `json:"lastUnplannedRestartTime,omitempty"`
+	// RecentUnplannedRestarts counts a chain of unplanned restarts where each
+	// occurred within crashLoopWindow of the previous one. A quiet gap longer
+	// than the window resets the chain to 1. Reaching crashLoopThreshold halts
+	// the VM and sets phase=failed (crash-loop give-up — under
+	// RunStrategyAlways KubeVirt would otherwise restart the VM forever).
+	// +optional
+	RecentUnplannedRestarts int `json:"recentUnplannedRestarts,omitempty"`
 }
 
 // AppliedSpec records the subset of DBInstanceSpec fields that are
@@ -458,6 +469,7 @@ const (
 	ReasonGuestAgentDisconnected = "GuestAgentDisconnected"
 	ReasonVMRestarting           = "VMRestarting"
 	ReasonMaxRestartsExceeded    = "MaxRestartsExceeded"
+	ReasonCrashLoopDetected      = "CrashLoopDetected"
 	ReasonRecovered              = "Recovered"
 
 	// Label keys applied to all Harvester resources owned by a DBInstance.

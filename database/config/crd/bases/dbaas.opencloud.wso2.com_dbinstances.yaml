@@ -380,6 +380,14 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              consecutiveRestartAttempts:
+                description: |-
+                  ConsecutiveRestartAttempts counts controller-initiated liveness restarts
+                  in the current unhealthy episode. Unlike RestartCount (cumulative,
+                  observability) this is the input to the max-restart guard and is reset
+                  to zero whenever the instance is observed fully healthy, so the guard
+                  reflects the current episode rather than lifetime history.
+                type: integer
               consecutiveUnhealthyCount:
                 description: |-
                   ConsecutiveUnhealthyCount is the number of consecutive phaseAvailable
@@ -406,6 +414,12 @@ spec:
                 description: |-
                   LastKnownVMIUID is the UID of the VMI last recorded by the controller.
                   A UID change during phaseAvailable indicates an unplanned restart.
+                type: string
+              lastUnplannedRestartTime:
+                description: |-
+                  LastUnplannedRestartTime is when the controller last observed an
+                  unplanned VMI restart (UID change). Input to crash-loop detection.
+                format: date-time
                 type: string
               masterUserSecret:
                 description: MasterUserSecret references the K8s Secret with credentials.
@@ -443,6 +457,14 @@ spec:
                 items:
                   type: string
                 type: array
+              recentUnplannedRestarts:
+                description: |-
+                  RecentUnplannedRestarts counts a chain of unplanned restarts where each
+                  occurred within crashLoopWindow of the previous one. A quiet gap longer
+                  than the window resets the chain to 1. Reaching crashLoopThreshold halts
+                  the VM and sets phase=failed (crash-loop give-up — under
+                  RunStrategyAlways KubeVirt would otherwise restart the VM forever).
+                type: integer
               resources:
                 description: Resources tracks every Harvester object created for cleanup
                   and idempotency.

@@ -53,7 +53,16 @@ const (
 	livenessDegradedThreshold = 3 // misses before setting Degraded condition
 	livenessRestartThreshold  = 5 // misses before StopVM+StartVM
 	livenessAgentAccelFactor  = 2 // divides restartThreshold when AgentConnected=False
-	maxRestartCount           = 3 // restarts before setting Failed and stopping requeue
+	maxRestartCount           = 3 // restart attempts per unhealthy episode before setting Failed
+
+	// Crash-loop detection for unplanned restarts (KI-006 Problem A). Under
+	// RunStrategyAlways KubeVirt recreates the VMI on every guest exit, so a
+	// crash-looping VM "recovers" forever and the episode guard above never
+	// fires. A chain of unplanned restarts, each within crashLoopWindow of
+	// the previous, reaching crashLoopThreshold halts the VM and fails the
+	// instance.
+	crashLoopThreshold = 3                // chained unplanned restarts before giving up
+	crashLoopWindow    = 10 * time.Minute // max gap between restarts to extend the chain
 )
 
 // DBInstanceReconciler reconciles DBInstance CRDs.
@@ -421,6 +430,42 @@ func (r *DBInstanceReconciler) phaseAvailable(ctx context.Context, inst *dbaasv1
 			inst.Status.RestartCount++
 			inst.Status.LastKnownVMIUID = readiness.VMIUID
 			inst.Status.ConsecutiveUnhealthyCount = 0
+
+			// Crash-loop detection (KI-006 Problem A): chain-count unplanned
+			// restarts. Each one within crashLoopWindow of the previous extends
+			// the chain; a quiet gap longer than the window starts a new chain.
+			now := metav1.Now()
+			if inst.Status.LastUnplannedRestartTime != nil &&
+				now.Sub(inst.Status.LastUnplannedRestartTime.Time) < crashLoopWindow {
+				inst.Status.RecentUnplannedRestarts++
+			} else {
+				inst.Status.RecentUnplannedRestarts = 1
+			}
+			inst.Status.LastUnplannedRestartTime = &now
+
+			if inst.Status.RecentUnplannedRestarts >= crashLoopThreshold {
+				termMsg := fmt.Sprintf("VM crash loop: %d unplanned restarts, each within %s of the previous; VM halted, manual intervention required",
+					inst.Status.RecentUnplannedRestarts, crashLoopWindow)
+				// Halt the VM before declaring failed: under RunStrategyAlways
+				// KubeVirt would otherwise keep restarting it forever — marking
+				// failed alone stops nothing. If StopVM fails, return without
+				// persisting; the next reconcile re-detects the UID change and
+				// retries the halt.
+				if err := r.Harvester.StopVM(ctx, ns, vmName); err != nil {
+					log.FromContext(ctx).Error(err, "StopVM failed during crash-loop halt (will retry)")
+					return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+				}
+				r.Recorder.Eventf(inst, corev1.EventTypeWarning, dbaasv1.ReasonCrashLoopDetected, "%s", termMsg)
+				setCondition(inst, dbaasv1.ConditionFailed, metav1.ConditionTrue,
+					dbaasv1.ReasonCrashLoopDetected, termMsg)
+				removeCondition(inst, dbaasv1.ConditionDegraded)
+				inst.Status.Phase = dbaasv1.StatusFailed
+				inst.Status.ProvisioningPhase = dbaasv1.PhaseFailed
+				inst.Status.Message = termMsg
+				_ = r.statusUpdate(ctx, inst)
+				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+			}
+
 			inst.Status.ProvisioningPhase = dbaasv1.PhaseVMCreated
 			inst.Status.Message = "Unplanned VM restart detected; waiting for readiness"
 			_ = r.statusUpdate(ctx, inst) // again go back to phaseWaitReady
