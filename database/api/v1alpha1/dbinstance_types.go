@@ -315,6 +315,13 @@ type DBInstanceStatus struct {
 	// AgentConnected=False). Reset to zero on any healthy reconcile or restart.
 	// +optional
 	ConsecutiveUnhealthyCount int `json:"consecutiveUnhealthyCount,omitempty"`
+	// ConsecutiveRestartAttempts counts controller-initiated liveness restarts
+	// in the current unhealthy episode. Unlike RestartCount (cumulative,
+	// observability) this is the input to the max-restart guard and is reset
+	// to zero whenever the instance is observed fully healthy, so the guard
+	// reflects the current episode rather than lifetime history.
+	// +optional
+	ConsecutiveRestartAttempts int `json:"consecutiveRestartAttempts,omitempty"`
 }
 
 // AppliedSpec records the subset of DBInstanceSpec fields that are
@@ -451,6 +458,7 @@ const (
 	ReasonGuestAgentDisconnected = "GuestAgentDisconnected"
 	ReasonVMRestarting           = "VMRestarting"
 	ReasonMaxRestartsExceeded    = "MaxRestartsExceeded"
+	ReasonRecovered              = "Recovered"
 
 	// Label keys applied to all Harvester resources owned by a DBInstance.
 	LabelInstance = "dbaas.opencloud.wso2.com/instance"

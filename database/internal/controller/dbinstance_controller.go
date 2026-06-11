@@ -149,7 +149,7 @@ func (r *DBInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	case dbaasv1.PhaseStopped:
 		return r.phaseStopped(ctx, &inst)
 	case dbaasv1.PhaseFailed:
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		return r.phaseFailed(ctx, &inst)
 	default:
 		return ctrl.Result{}, fmt.Errorf("unknown phase: %s", inst.Status.ProvisioningPhase)
 	}
@@ -433,8 +433,12 @@ func (r *DBInstanceReconciler) phaseAvailable(ctx context.Context, inst *dbaasv1
 	//   AgentConnected=True → QGA virtio channel is active (guest OS reachable)
 	healthy := readiness.Ready && readiness.AgentConnected
 	if healthy {
-		if inst.Status.ConsecutiveUnhealthyCount > 0 {
+		if inst.Status.ConsecutiveUnhealthyCount > 0 || inst.Status.ConsecutiveRestartAttempts > 0 {
+			// Episode over — reset both counters so the next unhealthy episode
+			// starts with a full restart budget (KI-006: the max-restart guard
+			// must reflect the current episode, not lifetime history).
 			inst.Status.ConsecutiveUnhealthyCount = 0
+			inst.Status.ConsecutiveRestartAttempts = 0
 			removeCondition(inst, dbaasv1.ConditionDegraded) // db is healthy again — clear Degraded if it was set
 		}
 	} else {
@@ -460,17 +464,26 @@ func (r *DBInstanceReconciler) phaseAvailable(ctx context.Context, inst *dbaasv1
 		// consecutive miss count >= restart threshold → StopVM + StartVM, increment RestartCount, reset consecutive miss count, clear Degraded condition
 		switch {
 		case count >= restartAt:
-			if inst.Status.RestartCount >= maxRestartCount {
+			// Guard on the episode-scoped attempt counter, NOT the lifetime
+			// RestartCount (KI-006: lifetime history — e.g. KubeVirt auto-
+			// recoveries observed weeks ago — must not send a current episode
+			// straight to failed without a single restart attempt).
+			if inst.Status.ConsecutiveRestartAttempts >= maxRestartCount {
 				termMsg := fmt.Sprintf("VM restarted %d times with no recovery; manual intervention required",
-					inst.Status.RestartCount)
+					inst.Status.ConsecutiveRestartAttempts)
 				setCondition(inst, dbaasv1.ConditionFailed, metav1.ConditionTrue,
 					dbaasv1.ReasonMaxRestartsExceeded, termMsg)
 				removeCondition(inst, dbaasv1.ConditionDegraded)
 				inst.Status.Phase = dbaasv1.StatusFailed
-				//TODO:inst.Status.ProvisioningPhase = dbaasv1.PhaseFailed  check the implication of this
+				// ProvisioningPhase=Failed moves the instance out of
+				// phaseAvailable's dispatch domain (KI-007: leaving it at
+				// Available made every counter-increment status write trigger
+				// the next reconcile — a self-sustaining hot loop). phaseFailed
+				// takes over with a 30s recovery probe.
+				inst.Status.ProvisioningPhase = dbaasv1.PhaseFailed
 				inst.Status.Message = termMsg
 				_ = r.statusUpdate(ctx, inst)
-				return ctrl.Result{}, nil // stop requeuing; requires manual intervention , controller phaseFailed reque after every 30 seconds
+				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 			}
 			r.Recorder.Eventf(inst, corev1.EventTypeWarning, dbaasv1.ReasonVMRestarting,
 				"Restarting VM after %d consecutive unhealthy reconciles (%s)", count, reason)
@@ -502,11 +515,12 @@ func (r *DBInstanceReconciler) phaseAvailable(ctx context.Context, inst *dbaasv1
 			}
 			// Both StopVM and StartVM succeeded — commit the restart.
 			inst.Status.RestartCount++
+			inst.Status.ConsecutiveRestartAttempts++
 			inst.Status.ConsecutiveUnhealthyCount = 0
 			inst.Status.LastKnownVMIUID = "" // phaseAvailable will snapshot the new UID on re-entry
 			removeCondition(inst, dbaasv1.ConditionDegraded)
 			inst.Status.ProvisioningPhase = dbaasv1.PhaseVMCreated
-			inst.Status.Message = fmt.Sprintf("Restarting VM (restart %d/%d)", inst.Status.RestartCount, maxRestartCount)
+			inst.Status.Message = fmt.Sprintf("Restarting VM (attempt %d/%d this episode)", inst.Status.ConsecutiveRestartAttempts, maxRestartCount)
 			_ = r.statusUpdate(ctx, inst)
 			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 
@@ -604,6 +618,31 @@ func (r *DBInstanceReconciler) phaseStopped(ctx context.Context, inst *dbaasv1.D
 		return r.reconcileStart(ctx, inst)
 	}
 	return ctrl.Result{}, nil
+}
+
+// phaseFailed parks an instance that exhausted its restart budget. Instead of
+// dead-ending (RF-6), it probes the VMI every 30s: if an operator repairs the
+// guest or restarts the VM out-of-band and it comes back fully healthy, the
+// instance clears Failed and re-enters the provisioning chain. KI-007 made
+// this recovery intentional — previously it worked only by accident, via the
+// phaseAvailable hot loop this handler replaces. No status writes happen while
+// still unhealthy, so the loop stays cold (30s requeues only).
+func (r *DBInstanceReconciler) phaseFailed(ctx context.Context, inst *dbaasv1.DBInstance) (ctrl.Result, error) {
+	readiness, err := r.Harvester.GetVMIReadiness(ctx, inst.Namespace, inst.Status.Resources.VMName)
+	if err != nil || !readiness.Running || !readiness.Ready || !readiness.AgentConnected {
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	r.Recorder.Eventf(inst, corev1.EventTypeNormal, dbaasv1.ReasonRecovered,
+		"VM healthy again after failed state; re-entering provisioning chain")
+	removeCondition(inst, dbaasv1.ConditionFailed)
+	inst.Status.ConsecutiveUnhealthyCount = 0
+	inst.Status.ConsecutiveRestartAttempts = 0
+	inst.Status.LastKnownVMIUID = "" // re-snapshot the recovered VMI on Available re-entry
+	inst.Status.Phase = dbaasv1.StatusStarting
+	inst.Status.ProvisioningPhase = dbaasv1.PhaseVMCreated
+	inst.Status.Message = "VM healthy again; re-validating readiness"
+	return ctrl.Result{RequeueAfter: 10 * time.Second}, r.statusUpdate(ctx, inst)
 }
 
 func (r *DBInstanceReconciler) reconcileStart(ctx context.Context, inst *dbaasv1.DBInstance) (ctrl.Result, error) {
