@@ -486,7 +486,7 @@ func (c *TypedClient) buildPostgresVM(p VMCreateParams, vmName, cloudInitSecretN
 
 	runStrategy := kubevirtv1.RunStrategyHalted
 	if running {
-		runStrategy = kubevirtv1.RunStrategyRerunOnFailure
+		runStrategy = kubevirtv1.RunStrategyAlways
 	}
 
 	labels := map[string]string{dbaasv1.LabelInstance: p.ID, dbaasv1.LabelRole: "primary"}
@@ -540,7 +540,15 @@ func (c *TypedClient) buildPostgresVM(p VMCreateParams, vmName, cloudInitSecretN
 	}
 	// Post build fixes
 	vm.TypeMeta = metav1.TypeMeta{APIVersion: "kubevirt.io/v1", Kind: "VirtualMachine"}
-	vm.Spec.Template.ObjectMeta.Annotations = mergeStringMap(vm.Spec.Template.ObjectMeta.Annotations, annotations) // Kube - OVN Annotation
+	vm.Spec.Template.ObjectMeta.Annotations = mergeStringMap(vm.Spec.Template.ObjectMeta.Annotations, annotations) // VMI/launcher-pod annotations (e.g. Kube-OVN logical switch)
+	// VM-object annotations read by Harvester's control plane (webhook + VM controller).
+	// AnnotationRunStrategy: Harvester's patchRunStrategy webhook reads this on every
+	// Halted→non-Halted transition and patches spec.runStrategy to match. Setting it to
+	// Always here ensures the webhook confirms our intent instead of overriding to RerunOnFailure.
+	if vm.Annotations == nil {
+		vm.Annotations = map[string]string{}
+	}
+	vm.Annotations[util.AnnotationRunStrategy] = string(kubevirtv1.RunStrategyAlways)
 	vm.Spec.Template.Spec.Domain.CPU.Sockets = 1
 	vm.Spec.Template.Spec.Domain.CPU.Threads = 1
 

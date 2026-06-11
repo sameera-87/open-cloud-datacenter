@@ -110,10 +110,13 @@ func (r *DBInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		if err := r.Update(ctx, &inst); err != nil {
 			return ctrl.Result{}, err
 		}
+		// Quesion : why we explicitly requeue after successfully adding finalizer? 2 Requeues qued now
+		// 1. since resource was updated (implicit requeue by controller-runtime) and 2. explicit requeue here
 		return ctrl.Result{Requeue: true}, nil
 	}
 
 	// --- Handle stop/start ---
+	// spec.running is set by users
 	if inst.Spec.Running != nil && !*inst.Spec.Running && inst.Status.Phase == dbaasv1.StatusAvailable {
 		return r.reconcileStop(ctx, &inst)
 	}

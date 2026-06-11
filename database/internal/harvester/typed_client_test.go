@@ -8,6 +8,7 @@ import (
 
 	harvesterhciov1beta1 "github.com/harvester/harvester/pkg/apis/harvesterhci.io/v1beta1"
 	harvesterfake "github.com/harvester/harvester/pkg/generated/clientset/versioned/fake"
+	harvesterutil "github.com/harvester/harvester/pkg/util"
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
@@ -222,6 +223,18 @@ func TestTypedCreatePostgresVMPreservesVMShape(t *testing.T) {
 	}
 	if !strings.Contains(body, `"networkDataSecretRef":{"name":"`+cloudInitSecretName+`"}`) {
 		t.Fatalf("VM JSON does not contain cloud-init networkDataSecretRef: %s", body)
+	}
+
+	// RunStrategy must be Always so the VMI restarts after any exit (clean or crash).
+	// RerunOnFailure would leave the VM permanently stopped after a clean guest shutdown,
+	// which can happen during cloud-init or after a cold resize restart.
+	if vm.Spec.RunStrategy == nil || *vm.Spec.RunStrategy != kubevirtv1.RunStrategyAlways {
+		t.Fatalf("RunStrategy = %v, want Always", vm.Spec.RunStrategy)
+	}
+	// AnnotationRunStrategy must match so Harvester's patchRunStrategy webhook confirms
+	// Always on every Halted→non-Halted transition instead of overriding to RerunOnFailure.
+	if got := vm.Annotations[harvesterutil.AnnotationRunStrategy]; got != string(kubevirtv1.RunStrategyAlways) {
+		t.Fatalf("AnnotationRunStrategy = %q, want %q", got, string(kubevirtv1.RunStrategyAlways))
 	}
 }
 
