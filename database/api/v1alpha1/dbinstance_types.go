@@ -424,6 +424,7 @@ const (
 	PhaseDatabaseReady       = "DatabaseReady"
 	PhaseMonitoringDeployed  = "MonitoringDeployed"
 	PhaseAvailable           = "Available"
+	PhaseStopped             = "Stopped"
 	PhaseFailed              = "Failed"
 
 	// Status.Phase values (RDS-compatible lowercase strings).

@@ -146,6 +146,8 @@ func (r *DBInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return r.phaseAvailable(ctx, &inst)
 	case dbaasv1.PhaseAvailable:
 		return r.phaseAvailable(ctx, &inst)
+	case dbaasv1.PhaseStopped:
+		return r.phaseStopped(ctx, &inst)
 	case dbaasv1.PhaseFailed:
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	default:
@@ -575,19 +577,33 @@ func (r *DBInstanceReconciler) reconcileStop(ctx context.Context, inst *dbaasv1.
 			fmt.Errorf("cannot modify field(s) %s while stopping; revert or recreate the DBInstance", drift))
 	}
 
-	ns := inst.Namespace
-	inst.Status.Phase = dbaasv1.StatusStopping
-	inst.Status.Message = "Stopping VM"
-	_ = r.statusUpdate(ctx, inst)
-
-	if err := r.Harvester.StopVM(ctx, ns, inst.Status.Resources.VMName); err != nil {
+	if err := r.Harvester.StopVM(ctx, inst.Namespace, inst.Status.Resources.VMName); err != nil {
 		return r.fail(ctx, inst, "StopFailed", err)
 	}
 
+	// Single atomic status write — no persistent phase=stopping intermediate.
+	// KI-005: a stale "stopping" snapshot in statusUpdate's retry loop could
+	// overwrite "stopped" and leave the dispatcher with no matching branch.
+	// ProvisioningPhase=Stopped moves the instance out of phaseAvailable's
+	// dispatch domain, so the RF-1 resurrection loop cannot fire.
 	inst.Status.Phase = dbaasv1.StatusStopped
+	inst.Status.ProvisioningPhase = dbaasv1.PhaseStopped
 	inst.Status.Message = "Stopped. Storage preserved."
 	inst.Status.ObservedGeneration = inst.Generation
+	inst.Status.ConsecutiveUnhealthyCount = 0
+	removeCondition(inst, dbaasv1.ConditionDegraded)
 	return ctrl.Result{}, r.statusUpdate(ctx, inst)
+}
+
+// phaseStopped is the idle state for a halted instance. The only exit is
+// spec.running flipping back to true, which re-enters the provisioning chain
+// via reconcileStart. No requeue while halted — spec edits trigger
+// event-driven reconciles.
+func (r *DBInstanceReconciler) phaseStopped(ctx context.Context, inst *dbaasv1.DBInstance) (ctrl.Result, error) {
+	if inst.Spec.Running == nil || *inst.Spec.Running {
+		return r.reconcileStart(ctx, inst)
+	}
+	return ctrl.Result{}, nil
 }
 
 func (r *DBInstanceReconciler) reconcileStart(ctx context.Context, inst *dbaasv1.DBInstance) (ctrl.Result, error) {
@@ -598,17 +614,34 @@ func (r *DBInstanceReconciler) reconcileStart(ctx context.Context, inst *dbaasv1
 	}
 
 	ns := inst.Namespace
-	inst.Status.Phase = dbaasv1.StatusStarting
-	_ = r.statusUpdate(ctx, inst)
+	vmName := inst.Status.Resources.VMName
 
-	if err := r.Harvester.StartVM(ctx, ns, inst.Status.Resources.VMName); err != nil {
+	// StopVM only sets RunStrategy=Halted; the VMI tears down asynchronously
+	// and KubeVirt's start subresource rejects calls while a VMI object still
+	// exists. Wait for teardown to finish (same guard as reconcileModify).
+	// Phase stays stopped/Stopped so the dispatcher re-enters here.
+	readiness, vmiErr := r.Harvester.GetVMIReadiness(ctx, ns, vmName)
+	if vmiErr != nil && !errors.IsNotFound(vmiErr) {
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	}
+	if readiness.Running {
+		inst.Status.Message = "Waiting for VM to finish stopping before start"
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, r.statusUpdate(ctx, inst)
+	}
+
+	if err := r.Harvester.StartVM(ctx, ns, vmName); err != nil {
 		return r.fail(ctx, inst, "StartFailed", err)
 	}
 
-	inst.Status.Phase = dbaasv1.StatusAvailable
-	inst.Status.Message = "Started"
+	// Re-enter the provisioning chain instead of declaring available here:
+	// phaseWaitReady gates on VMI readiness + the PostgreSQL probe, and
+	// phaseAvailable stamps phase=available only once the DB is actually up.
+	inst.Status.Phase = dbaasv1.StatusStarting
+	inst.Status.ProvisioningPhase = dbaasv1.PhaseVMCreated
 	inst.Status.ObservedGeneration = inst.Generation
-	return ctrl.Result{}, r.statusUpdate(ctx, inst)
+	inst.Status.LastKnownVMIUID = "" // planned start — don't count it as an unplanned restart
+	inst.Status.Message = "Starting; waiting for VM to become ready"
+	return ctrl.Result{RequeueAfter: 10 * time.Second}, r.statusUpdate(ctx, inst)
 }
 
 func (r *DBInstanceReconciler) reconcileModify(ctx context.Context, inst *dbaasv1.DBInstance) (ctrl.Result, error) {
