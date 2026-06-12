@@ -90,6 +90,7 @@ type DBInstanceReconciler struct {
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;create;update;delete
 // +kubebuilder:rbac:groups="",resources=endpoints,verbs=get;create;update;delete
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile is the main entry point called by controller-runtime.
 func (r *DBInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -530,11 +531,6 @@ func (r *DBInstanceReconciler) phaseAvailable(ctx context.Context, inst *dbaasv1
 				_ = r.statusUpdate(ctx, inst)
 				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 			}
-			r.Recorder.Eventf(inst, corev1.EventTypeWarning, dbaasv1.ReasonVMRestarting,
-				"Restarting VM after %d consecutive unhealthy reconciles (%s)", count, reason)
-			log.FromContext(ctx).Info("initiating liveness restart",
-				"consecutiveMisses", count, "reason", reason,
-				"restartCount", inst.Status.RestartCount)
 			if err := r.Harvester.StopVM(ctx, ns, vmName); err != nil {
 				// Stop failed — VM is likely still running. Leave ConsecutiveUnhealthyCount
 				// unchanged so the next phaseAvailable reconcile hits this path again and
@@ -546,6 +542,22 @@ func (r *DBInstanceReconciler) phaseAvailable(ctx context.Context, inst *dbaasv1
 				_ = r.statusUpdate(ctx, inst)
 				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 			}
+			// StopVM only sets RunStrategy=Halted; the VMI tears down
+			// asynchronously and KubeVirt's start subresource rejects while a
+			// VMI object exists (same guard as reconcileStart/reconcileModify).
+			// Return WITHOUT a status write: a write triggers an immediate
+			// watch-event reconcile, turning this 5s poll into a hot retry
+			// loop of failing StartVM calls. The in-memory counter increment
+			// is discarded on purpose. StopVM above is idempotent across polls.
+			if teardown, terr := r.Harvester.GetVMIReadiness(ctx, ns, vmName); terr == nil && teardown.Running {
+				log.FromContext(ctx).Info("waiting for VMI teardown before liveness restart", "vm", vmName)
+				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+			}
+			r.Recorder.Eventf(inst, corev1.EventTypeWarning, dbaasv1.ReasonVMRestarting,
+				"Restarting VM after %d consecutive unhealthy reconciles (%s)", count, reason)
+			log.FromContext(ctx).Info("initiating liveness restart",
+				"consecutiveMisses", count, "reason", reason,
+				"restartCount", inst.Status.RestartCount)
 			if err := r.Harvester.StartVM(ctx, ns, vmName); err != nil {
 				// Stop succeeded but start failed — VM is now halted. Leave ConsecutiveUnhealthyCount
 				// unchanged and stay in phaseAvailable so the next reconcile retries StopVM
