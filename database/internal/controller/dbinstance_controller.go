@@ -377,9 +377,7 @@ func (r *DBInstanceReconciler) phaseMonitoring(ctx context.Context, inst *dbaasv
 }
 
 func (r *DBInstanceReconciler) phaseAvailable(ctx context.Context, inst *dbaasv1.DBInstance) (ctrl.Result, error) {
-	// Snapshot before any mutation so we can skip the kube-apiserver
-	// round-trip when nothing changed. This runs on every ~60 s requeue
-	// for every Available DBInstance.
+	// Snapshot before any mutation so we can skip the kube-apiserver round-trip when nothing changed. This runs on every ~60 s requeue for every Available DBInstance.
 	prev := inst.Status.DeepCopy()
 	ns := inst.Namespace
 	vmName := inst.Status.Resources.VMName
@@ -389,10 +387,7 @@ func (r *DBInstanceReconciler) phaseAvailable(ctx context.Context, inst *dbaasv1
 	inst.Status.ObservedGeneration = inst.Generation
 	inst.Status.Message = "Database instance is available"
 
-	// On first entry to Available, scrub the ephemeral cloud-init Secret.
-	// RemoveCloudInitDisk must succeed first: it patches the VM spec so future
-	// VMI restarts (poweroff → KubeVirt recreates VMI) don't try to mount the
-	// now-absent secret and get stuck with FailedMount on the virt-launcher pod.
+	// On first entry to Available, scrub the ephemeral cloud-init Secret to prevent failed mount scenario
 	// If disk removal fails we leave the secret in place and retry next reconcile.
 	if ciName := inst.Status.Resources.CloudInitSecretName; ciName != "" {
 		if removeErr := r.Harvester.RemoveCloudInitDisk(ctx, ns, vmName); removeErr != nil {
@@ -415,26 +410,23 @@ func (r *DBInstanceReconciler) phaseAvailable(ctx context.Context, inst *dbaasv1
 	// -------------------------------------------------------------------------
 
 	// UID check: detect unplanned restarts. A new UID means the VMI object was
-	// deleted and recreated (QEMU crash, OS panic, RunStrategyRerunOnFailure
-	// auto-recovery). This is distinct from a live migration, which does not
-	// change the UID. (User Comment : what is the evidence for this live migration is different claim ?)
+	// deleted and recreated (QEMU crash, OS panic, RunStrategyRerunOnFailure auto-recovery). 
+	// This is distinct from a live migration, which does not change the UID.(Evidence ?)
 	if readiness.VMIUID != "" {
 		if inst.Status.LastKnownVMIUID == "" {
 			// First entry to phaseAvailable — snapshot the running VMI's UID.
 			inst.Status.LastKnownVMIUID = readiness.VMIUID
+
 		} else if inst.Status.LastKnownVMIUID != readiness.VMIUID {
-			log.FromContext(ctx).Info("unplanned VMI restart detected",
-				"oldUID", inst.Status.LastKnownVMIUID, "newUID", readiness.VMIUID)
-			r.Recorder.Eventf(inst, corev1.EventTypeWarning, dbaasv1.ReasonVMRestarting,
-				"Unplanned VMI restart detected (UID %s → %s)",
-				inst.Status.LastKnownVMIUID, readiness.VMIUID)
-			inst.Status.RestartCount++
+			log.FromContext(ctx).Info("unplanned VMI restart detected","oldUID", inst.Status.LastKnownVMIUID, "newUID", readiness.VMIUID)
+			r.Recorder.Eventf(inst, corev1.EventTypeWarning, dbaasv1.ReasonVMRestarting,"Unplanned VMI restart detected (UID %s → %s)",inst.Status.LastKnownVMIUID, readiness.VMIUID)
+			inst.Status.RestartCount++ //for observerability only , no-op
 			inst.Status.LastKnownVMIUID = readiness.VMIUID
 			inst.Status.ConsecutiveUnhealthyCount = 0
 
-			// Crash-loop detection (KI-006 Problem A): chain-count unplanned
-			// restarts. Each one within crashLoopWindow of the previous extends
-			// the chain; a quiet gap longer than the window starts a new chain.
+			// Crash-loop detection: chain-count unplanned restarts
+			// Each one within crashLoopWindow of the previous extends the chain.
+			// quiet gap longer than the window starts a new chain.
 			now := metav1.Now()
 			if inst.Status.LastUnplannedRestartTime != nil &&
 				now.Sub(inst.Status.LastUnplannedRestartTime.Time) < crashLoopWindow {
@@ -447,11 +439,8 @@ func (r *DBInstanceReconciler) phaseAvailable(ctx context.Context, inst *dbaasv1
 			if inst.Status.RecentUnplannedRestarts >= crashLoopThreshold {
 				termMsg := fmt.Sprintf("VM crash loop: %d unplanned restarts, each within %s of the previous; VM halted, manual intervention required",
 					inst.Status.RecentUnplannedRestarts, crashLoopWindow)
-				// Halt the VM before declaring failed: under RunStrategyAlways
-				// KubeVirt would otherwise keep restarting it forever — marking
-				// failed alone stops nothing. If StopVM fails, return without
-				// persisting; the next reconcile re-detects the UID change and
-				// retries the halt.
+				// Halt the VM before declaring failed: under RunStrategyAlways KubeVirt keep restarting it forever. 
+				// If StopVM fails , return without no status update , retry with next reconcile.
 				if err := r.Harvester.StopVM(ctx, ns, vmName); err != nil {
 					log.FromContext(ctx).Error(err, "StopVM failed during crash-loop halt (will retry)")
 					return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
@@ -469,7 +458,7 @@ func (r *DBInstanceReconciler) phaseAvailable(ctx context.Context, inst *dbaasv1
 
 			inst.Status.ProvisioningPhase = dbaasv1.PhaseVMCreated
 			inst.Status.Message = "Unplanned VM restart detected; waiting for readiness"
-			_ = r.statusUpdate(ctx, inst) // again go back to phaseWaitReady
+			_ = r.statusUpdate(ctx, inst) // go back to phaseVMCreated -> phaseWaitReady
 			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 		}
 	}
@@ -480,98 +469,68 @@ func (r *DBInstanceReconciler) phaseAvailable(ctx context.Context, inst *dbaasv1
 	healthy := readiness.Ready && readiness.AgentConnected
 	if healthy {
 		if inst.Status.ConsecutiveUnhealthyCount > 0 || inst.Status.ConsecutiveRestartAttempts > 0 {
-			// Episode over — reset both counters so the next unhealthy episode
-			// starts with a full restart budget (KI-006: the max-restart guard
-			// must reflect the current episode, not lifetime history).
+			// Episode over — reset both counters so the next unhealthy episode starts with a full restart budget 
 			inst.Status.ConsecutiveUnhealthyCount = 0
 			inst.Status.ConsecutiveRestartAttempts = 0
 			removeCondition(inst, dbaasv1.ConditionDegraded) // db is healthy again — clear Degraded if it was set
 		}
 	} else {
+		// Classify the failure and choose the restart threshold.
+		// failure : OS unreachable or PostgreSQL unreachable
 		inst.Status.ConsecutiveUnhealthyCount++
 		count := inst.Status.ConsecutiveUnhealthyCount
 
-		// Classify the failure and choose the restart threshold.
-		// failure : OS unreachable or PostgreSQL unreachable
-		// AgentConnected=False means the guest OS itself is unreachable —
-		// there is no self-recovery path, so escalate faster.
 		reason := dbaasv1.ReasonPostgresUnreachable
 		unhealthyMsg := fmt.Sprintf("PostgreSQL readiness probe failing (%d consecutive misses)", count)
 		restartAt := livenessRestartThreshold
+
 		if !readiness.AgentConnected {
 			reason = dbaasv1.ReasonGuestAgentDisconnected
 			unhealthyMsg = fmt.Sprintf("QEMU guest agent disconnected (%d consecutive misses)", count)
 			restartAt = livenessRestartThreshold / livenessAgentAccelFactor // fail fast - OS is unreachable
 		}
-
 		// pefrom liveness escalation action according to escalation ladder
 		// consecutive miss count >= warn threshold → emit Warning Event
 		// consecutive miss count >= degraded threshold → set Degraded condition + emit Warning Event
 		// consecutive miss count >= restart threshold → StopVM + StartVM, increment RestartCount, reset consecutive miss count, clear Degraded condition
 		switch {
 		case count >= restartAt:
-			// Guard on the episode-scoped attempt counter, NOT the lifetime
-			// RestartCount (KI-006: lifetime history — e.g. KubeVirt auto-
-			// recoveries observed weeks ago — must not send a current episode
-			// straight to failed without a single restart attempt).
 			if inst.Status.ConsecutiveRestartAttempts >= maxRestartCount {
 				termMsg := fmt.Sprintf("VM restarted %d times with no recovery; manual intervention required",
 					inst.Status.ConsecutiveRestartAttempts)
-				setCondition(inst, dbaasv1.ConditionFailed, metav1.ConditionTrue,
-					dbaasv1.ReasonMaxRestartsExceeded, termMsg)
+				setCondition(inst, dbaasv1.ConditionFailed, metav1.ConditionTrue,dbaasv1.ReasonMaxRestartsExceeded, termMsg)
 				removeCondition(inst, dbaasv1.ConditionDegraded)
 				inst.Status.Phase = dbaasv1.StatusFailed
-				// ProvisioningPhase=Failed moves the instance out of
-				// phaseAvailable's dispatch domain (KI-007: leaving it at
-				// Available made every counter-increment status write trigger
-				// the next reconcile — a self-sustaining hot loop). phaseFailed
-				// takes over with a 30s recovery probe.
 				inst.Status.ProvisioningPhase = dbaasv1.PhaseFailed
 				inst.Status.Message = termMsg
 				_ = r.statusUpdate(ctx, inst)
 				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 			}
 			if err := r.Harvester.StopVM(ctx, ns, vmName); err != nil {
-				// Stop failed — VM is likely still running. Leave ConsecutiveUnhealthyCount
-				// unchanged so the next phaseAvailable reconcile hits this path again and
-				// retries StopVM. Do NOT transition to phaseWaitReady.
 				log.FromContext(ctx).Error(err, "StopVM failed during liveness restart")
-				r.Recorder.Eventf(inst, corev1.EventTypeWarning, dbaasv1.ReasonVMRestarting,
-					"StopVM failed: %v; will retry", err)
+				r.Recorder.Eventf(inst, corev1.EventTypeWarning, dbaasv1.ReasonVMRestarting,"StopVM failed: %v; will retry", err)
 				inst.Status.Message = fmt.Sprintf("StopVM failed: %v", err)
 				_ = r.statusUpdate(ctx, inst)
 				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 			}
-			// StopVM only sets RunStrategy=Halted; the VMI tears down
-			// asynchronously and KubeVirt's start subresource rejects while a
-			// VMI object exists (same guard as reconcileStart/reconcileModify).
-			// Return WITHOUT a status write: a write triggers an immediate
-			// watch-event reconcile, turning this 5s poll into a hot retry
-			// loop of failing StartVM calls. The in-memory counter increment
-			// is discarded on purpose. StopVM above is idempotent across polls.
+			// wait until the VMI is fully terminated , otherwise start VM subresource call fail. 
 			if teardown, terr := r.Harvester.GetVMIReadiness(ctx, ns, vmName); terr == nil && teardown.Running {
 				log.FromContext(ctx).Info("waiting for VMI teardown before liveness restart", "vm", vmName)
 				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 			}
-			r.Recorder.Eventf(inst, corev1.EventTypeWarning, dbaasv1.ReasonVMRestarting,
-				"Restarting VM after %d consecutive unhealthy reconciles (%s)", count, reason)
-			log.FromContext(ctx).Info("initiating liveness restart",
-				"consecutiveMisses", count, "reason", reason,
-				"restartCount", inst.Status.RestartCount)
+			r.Recorder.Eventf(inst, corev1.EventTypeWarning, dbaasv1.ReasonVMRestarting,"Restarting VM after %d consecutive unhealthy reconciles (%s)", count, reason)
+			log.FromContext(ctx).Info("initiating liveness restart","consecutiveMisses", count, "reason", reason,"restartCount", inst.Status.RestartCount)
+
 			if err := r.Harvester.StartVM(ctx, ns, vmName); err != nil {
-				// Stop succeeded but start failed — VM is now halted. Leave ConsecutiveUnhealthyCount
-				// unchanged and stay in phaseAvailable so the next reconcile retries StopVM
-				// (no-op on a halted VM) then StartVM again. Do NOT increment RestartCount
-				// since the restart did not complete.
+				// StartVM failed - Do not increment ConsecutiveRestartAttempts, retry with next reconcile.
 				log.FromContext(ctx).Error(err, "StartVM failed during liveness restart")
-				r.Recorder.Eventf(inst, corev1.EventTypeWarning, dbaasv1.ReasonVMRestarting,
-					"StartVM failed: %v; VM is halted, will retry", err)
+				r.Recorder.Eventf(inst, corev1.EventTypeWarning, dbaasv1.ReasonVMRestarting,"StartVM failed: %v; VM is halted, will retry", err)
 				inst.Status.Message = fmt.Sprintf("StartVM failed: %v; VM is halted", err)
 				_ = r.statusUpdate(ctx, inst)
 				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 			}
 			// Both StopVM and StartVM succeeded — commit the restart.
-			inst.Status.RestartCount++
+			inst.Status.RestartCount++  // observerbility - lifetime restart count. 
 			inst.Status.ConsecutiveRestartAttempts++
 			inst.Status.ConsecutiveUnhealthyCount = 0
 			inst.Status.LastKnownVMIUID = "" // phaseAvailable will snapshot the new UID on re-entry
