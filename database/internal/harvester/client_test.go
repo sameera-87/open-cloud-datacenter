@@ -185,17 +185,19 @@ func newTestHarvesterClient(objs ...runtime.Object) *Client {
 
 func testVMCreateParams() VMCreateParams {
 	return VMCreateParams{
-		ID:             "orders",
-		Namespace:      "tenant-a",
-		CPUCores:       2,
-		MemoryMB:       4096,
-		OSImage:        "ubuntu-22.04",
-		DataVolumeRef:  "pg-orders-data",
-		NADName:        "tenant-a/vm-network",
-		MasterUser:     "dbadmin",
-		DBName:         "orders",
-		Port:           5432,
-		MaxConnections: 100,
+		ID:                     "orders",
+		Namespace:              "tenant-a",
+		CPUCores:               2,
+		MemoryMB:               4096,
+		OSImage:                "ubuntu-22.04",
+		DataVolumeRef:          "pg-orders-data",
+		DataVolumeSizeGB:       20,
+		DataVolumeStorageClass: "harvester-longhorn",
+		NADName:                "tenant-a/vm-network",
+		MasterUser:             "dbadmin",
+		DBName:                 "orders",
+		Port:                   5432,
+		MaxConnections:         100,
 	}
 }
 

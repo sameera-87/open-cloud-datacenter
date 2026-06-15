@@ -17,6 +17,13 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - ""
+  resources:
   - pods
   verbs:
   - get
@@ -94,4 +101,12 @@ rules:
   - create
   - delete
   - get
+  - update
+- apiGroups:
+  - subresources.kubevirt.io
+  resources:
+  - virtualmachines/restart
+  - virtualmachines/start
+  - virtualmachines/stop
+  verbs:
   - update

@@ -27,7 +27,6 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
-	"k8s.io/client-go/dynamic"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
@@ -39,7 +38,6 @@ import (
 	dbaasv1alpha1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/controller"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/gateway"
-	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/harvester"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -170,16 +168,11 @@ func main() {
 
 	restConfig := ctrl.GetConfigOrDie()
 
-	// Dynamic client for Harvester resources (KubeVirt, CDI, Kube-OVN, ...).
-	// The reconciler uses unstructured objects so it doesn't depend on the
-	// Harvester/KubeVirt typed schemas being imported.
-	dynClient, err := dynamic.NewForConfig(restConfig)
+	hvClient, err := newHarvesterClient(restConfig, grafanaURL, mgmtLogicalSwitch)
 	if err != nil {
-		setupLog.Error(err, "Failed to create dynamic client")
+		setupLog.Error(err, "Failed to create Harvester client")
 		os.Exit(1)
 	}
-	hvClient := harvester.NewClient(dynClient, grafanaURL)
-	hvClient.MgmtLogicalSwitch = mgmtLogicalSwitch
 
 	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
 		Scheme:                 scheme,

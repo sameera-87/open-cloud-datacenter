@@ -94,10 +94,14 @@ type DBInstanceSpec struct {
 	MasterUserPasswordRef *SecretKeyRef `json:"masterUserPasswordRef,omitempty"`
 
 	// AllocatedStorage in GiB.
-	// Mutable: changing this on an Available instance resizes the pgdata
-	// DataVolume (only larger values are accepted by CDI/Longhorn).
+	// Mutable but grow-only: changing this on an Available instance resizes the
+	// pgdata volume. Only larger values are accepted — Harvester/Longhorn ignore
+	// a request below the live PVC size, so a shrink would silently no-op. The
+	// CEL transition rule below rejects shrinks at apply time (evaluated on
+	// update only, so create is unaffected).
 	// +required
 	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:XValidation:rule="self >= oldSelf",message="allocatedStorage can only grow; shrinking is not supported"
 	AllocatedStorage int `json:"allocatedStorage"`
 
 	// StorageType maps to a Longhorn StorageClass. Default "longhorn".
@@ -299,6 +303,28 @@ type DBInstanceStatus struct {
 	// through to the running database. Used for honest modify semantics.
 	// +optional
 	AppliedSpec *AppliedSpec `json:"appliedSpec,omitempty"`
+
+	// RestartCount is the cumulative number of VM restarts detected or
+	// initiated by the controller liveness loop (both planned and unplanned).
+	// +optional
+	RestartCount int `json:"restartCount,omitempty"`
+
+	// LastKnownVMIUID is the UID of the VMI last recorded by the controller.
+	// A UID change during phaseAvailable indicates an unplanned restart.
+	// +optional
+	LastKnownVMIUID string `json:"lastKnownVMIUID,omitempty"`
+
+	// LastUnplannedRestartTime is when the controller last observed an
+	// unplanned VMI restart (UID change). Input to crash-loop detection.
+	// +optional
+	LastUnplannedRestartTime *metav1.Time `json:"lastUnplannedRestartTime,omitempty"`
+	// RecentUnplannedRestarts counts a chain of unplanned restarts where each
+	// occurred within crashLoopWindow of the previous one. A quiet gap longer
+	// than the window resets the chain to 1. Reaching crashLoopThreshold halts
+	// the VM and sets phase=failed (crash-loop give-up — under
+	// RunStrategyAlways KubeVirt would otherwise restart the VM forever).
+	// +optional
+	RecentUnplannedRestarts int `json:"recentUnplannedRestarts,omitempty"`
 }
 
 // AppliedSpec records the subset of DBInstanceSpec fields that are
@@ -408,6 +434,7 @@ const (
 	PhaseDatabaseReady       = "DatabaseReady"
 	PhaseMonitoringDeployed  = "MonitoringDeployed"
 	PhaseAvailable           = "Available"
+	PhaseStopped             = "Stopped"
 	PhaseFailed              = "Failed"
 
 	// Status.Phase values (RDS-compatible lowercase strings).
@@ -423,6 +450,18 @@ const (
 	// MasterUserSecretRef.Status values.
 	SecretStatusActive   = "active"
 	SecretStatusImpaired = "impaired"
+
+	// Condition type constants for DBInstance liveness monitoring.
+	// These are the Type field of entries in Status.Conditions.
+	ConditionDegraded = "Degraded" // readiness probe failing or guest agent disconnected (report-only)
+	ConditionFailed   = "Failed"   // crash-loop give-up, or a fatal provisioning error
+
+	// Condition reason constants (Conditions[].Reason).
+	ReasonPostgresUnreachable    = "PostgresUnreachable"
+	ReasonGuestAgentDisconnected = "GuestAgentDisconnected"
+	ReasonVMRestarting           = "VMRestarting"
+	ReasonCrashLoopDetected      = "CrashLoopDetected"
+	ReasonRecovered              = "Recovered"
 
 	// Label keys applied to all Harvester resources owned by a DBInstance.
 	LabelInstance = "dbaas.opencloud.wso2.com/instance"

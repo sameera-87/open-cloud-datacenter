@@ -74,10 +74,16 @@ spec:
               allocatedStorage:
                 description: |-
                   AllocatedStorage in GiB.
-                  Mutable: changing this on an Available instance resizes the pgdata
-                  DataVolume (only larger values are accepted by CDI/Longhorn).
+                  Mutable but grow-only: changing this on an Available instance resizes the
+                  pgdata volume. Only larger values are accepted — Harvester/Longhorn ignore
+                  a request below the live PVC size, so a shrink would silently no-op. The
+                  CEL transition rule below rejects shrinks at apply time (evaluated on
+                  update only, so create is unaffected).
                 minimum: 1
                 type: integer
+                x-kubernetes-validations:
+                - message: allocatedStorage can only grow; shrinking is not supported
+                  rule: self >= oldSelf
               backupRetentionPeriod:
                 description: |-
                   BackupRetentionPeriod in days. 0 (default) = disabled.
@@ -396,6 +402,17 @@ spec:
               grafanaUrl:
                 description: GrafanaURL is the per-instance Grafana dashboard URL.
                 type: string
+              lastKnownVMIUID:
+                description: |-
+                  LastKnownVMIUID is the UID of the VMI last recorded by the controller.
+                  A UID change during phaseAvailable indicates an unplanned restart.
+                type: string
+              lastUnplannedRestartTime:
+                description: |-
+                  LastUnplannedRestartTime is when the controller last observed an
+                  unplanned VMI restart (UID change). Input to crash-loop detection.
+                format: date-time
+                type: string
               masterUserSecret:
                 description: MasterUserSecret references the K8s Secret with credentials.
                 properties:
@@ -432,6 +449,14 @@ spec:
                 items:
                   type: string
                 type: array
+              recentUnplannedRestarts:
+                description: |-
+                  RecentUnplannedRestarts counts a chain of unplanned restarts where each
+                  occurred within crashLoopWindow of the previous one. A quiet gap longer
+                  than the window resets the chain to 1. Reaching crashLoopThreshold halts
+                  the VM and sets phase=failed (crash-loop give-up — under
+                  RunStrategyAlways KubeVirt would otherwise restart the VM forever).
+                type: integer
               resources:
                 description: Resources tracks every Harvester object created for cleanup
                   and idempotency.
@@ -464,6 +489,11 @@ spec:
                   vmName:
                     type: string
                 type: object
+              restartCount:
+                description: |-
+                  RestartCount is the cumulative number of VM restarts detected or
+                  initiated by the controller liveness loop (both planned and unplanned).
+                type: integer
             type: object
         type: object
     served: true

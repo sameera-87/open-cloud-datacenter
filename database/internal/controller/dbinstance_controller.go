@@ -20,11 +20,14 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -33,13 +36,6 @@ import (
 	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/harvester"
 )
-
-// probeListener is the function phaseWaitReady calls to confirm postgres
-// is actually accepting TCP before marking the instance DatabaseReady.
-// Package-level var so tests can stub it without doing real network I/O.
-var probeListener = func(c harvester.Interface, ctx context.Context, ns, vmName string, port int) error {
-	return c.DialVMListener(ctx, ns, vmName, port)
-}
 
 // Controller-side defaults for fields the user can leave blank on the
 // DBInstance spec. Centralised here so phaseStorage, phaseVM, and
@@ -50,6 +46,22 @@ const (
 	defaultStorageType = "longhorn"
 	defaultMasterUser  = "dbadmin"
 	defaultPort        = 5432
+
+	// Liveness for phaseAvailable is report-only: the controller reacts to the
+	// KubeVirt readiness probe's already-debounced Ready condition (tuned via
+	// FailureThreshold/SuccessThreshold on the VM probe) and surfaces a Degraded
+	// condition. It does NOT restart the VM on readiness failure — sustained
+	// outages are an operator concern, and flap-rate detection belongs in
+	// Prometheus alerting on the exporter metrics, not in this 60s loop. The
+	// only controller-initiated halt is the crash-loop guard below.
+
+	// Crash-loop detection for unplanned restarts (KI-006 Problem A). Under
+	// RunStrategyAlways KubeVirt recreates the VMI on every guest exit, so a
+	// crash-looping VM "recovers" forever on its own. A chain of unplanned
+	// restarts (VMI UID changes), each within crashLoopWindow of the previous,
+	// reaching crashLoopThreshold halts the VM and fails the instance.
+	crashLoopThreshold = 3                // chained unplanned restarts before giving up
+	crashLoopWindow    = 10 * time.Minute // max gap between restarts to extend the chain
 )
 
 // DBInstanceReconciler reconciles DBInstance CRDs.
@@ -57,7 +69,8 @@ const (
 // updates the status, and requeues for the next phase.
 type DBInstanceReconciler struct {
 	client.Client
-	Harvester harvester.Interface
+	Harvester harvester.ClientInterface
+	Recorder  record.EventRecorder
 }
 
 // DBInstance CRD permissions.
@@ -68,6 +81,7 @@ type DBInstanceReconciler struct {
 // Harvester resources the reconciler creates and tears down on behalf of callers.
 // +kubebuilder:rbac:groups=kubevirt.io,resources=virtualmachines,verbs=get;create;update;delete
 // +kubebuilder:rbac:groups=kubevirt.io,resources=virtualmachineinstances,verbs=get
+// +kubebuilder:rbac:groups=subresources.kubevirt.io,resources=virtualmachines/start;virtualmachines/stop;virtualmachines/restart,verbs=update
 // +kubebuilder:rbac:groups=cdi.kubevirt.io,resources=datavolumes,verbs=get;create;update;delete
 // +kubebuilder:rbac:groups=harvesterhci.io,resources=virtualmachineimages,verbs=get;list
 // +kubebuilder:rbac:groups=monitoring.coreos.com,resources=servicemonitors,verbs=get;create;update;delete
@@ -75,6 +89,7 @@ type DBInstanceReconciler struct {
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;create;update;delete
 // +kubebuilder:rbac:groups="",resources=endpoints,verbs=get;create;update;delete
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile is the main entry point called by controller-runtime.
 func (r *DBInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -83,7 +98,7 @@ func (r *DBInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	var inst dbaasv1.DBInstance
 	if err := r.Get(ctx, req.NamespacedName, &inst); err != nil {
 		if errors.IsNotFound(err) {
-			return ctrl.Result{}, nil // deleted
+			return ctrl.Result{}, nil // ignore already deleted
 		}
 		return ctrl.Result{}, err
 	}
@@ -104,10 +119,13 @@ func (r *DBInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		if err := r.Update(ctx, &inst); err != nil {
 			return ctrl.Result{}, err
 		}
+		// Quesion : why we explicitly requeue after successfully adding finalizer? 2 Requeues qued now
+		// 1. since resource was updated (implicit requeue by controller-runtime) and 2. explicit requeue here
 		return ctrl.Result{Requeue: true}, nil
 	}
 
 	// --- Handle stop/start ---
+	// spec.running is set by users
 	if inst.Spec.Running != nil && !*inst.Spec.Running && inst.Status.Phase == dbaasv1.StatusAvailable {
 		return r.reconcileStop(ctx, &inst)
 	}
@@ -115,8 +133,9 @@ func (r *DBInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return r.reconcileStart(ctx, &inst)
 	}
 
-	// --- Handle spec changes on available instance ---
-	if inst.Status.Phase == dbaasv1.StatusAvailable && inst.Generation != inst.Status.ObservedGeneration {
+	// --- Handle spec changes on available or in-progress-modifying instance ---
+	if (inst.Status.Phase == dbaasv1.StatusAvailable || inst.Status.Phase == dbaasv1.StatusModifying) &&
+		inst.Generation != inst.Status.ObservedGeneration {
 		return r.reconcileModify(ctx, &inst)
 	}
 
@@ -128,6 +147,9 @@ func (r *DBInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return r.phaseStorage(ctx, &inst)
 	case dbaasv1.PhaseStorageProvisioned:
 		return r.phaseVM(ctx, &inst)
+	// PhaseWaitingForCloudInit is no longer written (phaseWaitReady uses a single
+	// PhaseVMCreated phase and per-gate messages), but is still matched here so
+	// CRs created before that change still route to the wait handler.
 	case dbaasv1.PhaseVMCreated, dbaasv1.PhaseWaitingForCloudInit:
 		return r.phaseWaitReady(ctx, &inst)
 	case dbaasv1.PhaseDatabaseReady:
@@ -136,8 +158,10 @@ func (r *DBInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return r.phaseAvailable(ctx, &inst)
 	case dbaasv1.PhaseAvailable:
 		return r.phaseAvailable(ctx, &inst)
+	case dbaasv1.PhaseStopped:
+		return r.phaseStopped(ctx, &inst)
 	case dbaasv1.PhaseFailed:
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		return r.phaseFailed(ctx, &inst)
 	default:
 		return ctrl.Result{}, fmt.Errorf("unknown phase: %s", inst.Status.ProvisioningPhase)
 	}
@@ -165,7 +189,7 @@ func (r *DBInstanceReconciler) phaseNetwork(ctx context.Context, inst *dbaasv1.D
 		return r.fail(ctx, inst, "NetworkRefMissing",
 			fmt.Errorf("spec.networkRef is required (namespace/nad of an existing Multus NetworkAttachmentDefinition)"))
 	}
-
+	// No check for existence of the NAD; we should implement this
 	inst.Status.Resources.NADName = inst.Spec.NetworkRef
 	inst.Status.ProvisioningPhase = dbaasv1.PhaseNetworkProvisioned
 	inst.Status.Message = fmt.Sprintf("Using network %s", inst.Spec.NetworkRef)
@@ -174,6 +198,7 @@ func (r *DBInstanceReconciler) phaseNetwork(ctx context.Context, inst *dbaasv1.D
 }
 
 func (r *DBInstanceReconciler) phaseStorage(ctx context.Context, inst *dbaasv1.DBInstance) (ctrl.Result, error) {
+	// skip if already done
 	if inst.Status.Resources.DataVolumeName != "" {
 		inst.Status.ProvisioningPhase = dbaasv1.PhaseStorageProvisioned
 		return r.advance(ctx, inst)
@@ -181,9 +206,9 @@ func (r *DBInstanceReconciler) phaseStorage(ctx context.Context, inst *dbaasv1.D
 
 	id := inst.Name
 	ns := inst.Namespace
-	storageType := inst.Spec.StorageType
+	storageType := inst.Spec.StorageType //storage class of the data volume, should this be a spec ?
 	if storageType == "" {
-		storageType = defaultStorageType
+		storageType = defaultStorageType // longhorn or harvester-longhorn ?
 	}
 
 	dvName, err := r.Harvester.CreateDataVolume(ctx, id, ns, inst.Spec.AllocatedStorage, storageType)
@@ -193,7 +218,7 @@ func (r *DBInstanceReconciler) phaseStorage(ctx context.Context, inst *dbaasv1.D
 
 	inst.Status.Resources.DataVolumeName = dvName
 	inst.Status.ProvisioningPhase = dbaasv1.PhaseStorageProvisioned
-	inst.Status.Message = "Encrypted storage provisioned"
+	inst.Status.Message = "Encrypted storage provisioned"  // Enctyption ? longhorn and harvester-longhorn storage class doesn't have volume encryption enabled by default.
 
 	return r.advance(ctx, inst)
 }
@@ -230,31 +255,37 @@ func (r *DBInstanceReconciler) phaseVM(ctx context.Context, inst *dbaasv1.DBInst
 	}
 
 	vmName, credSecretName, cloudInitSecretName, caCertPEM, err := r.Harvester.CreatePostgresVM(ctx, harvester.VMCreateParams{
-		ID:             id,
-		Namespace:      ns,
-		CPUCores:       classSpec.CPUCores,
-		MemoryMB:       classSpec.MemoryMB,
-		OSImage:        osImage,
-		DataVolumeRef:  inst.Status.Resources.DataVolumeName,
-		NADName:        inst.Status.Resources.NADName,
-		MasterUser:     masterUser,
-		DBName:         dbName,
-		Port:           specPort(inst.Spec.Port),
-		MaxConnections: classSpec.MaxConnections,
-		BackupEnabled:  inst.Spec.BackupRetentionPeriod > 0,
-		BackupWindow:   inst.Spec.PreferredBackupWindow,
-		S3Config:       inst.Spec.S3BackupConfig,
-		VMPassword:     inst.Spec.VMPassword,
-		StaticNetwork:  inst.Spec.StaticNetwork,
-		DNSServerIP:    inst.Spec.DNSServerIP,
+		ID:                     id,
+		Namespace:              ns,
+		CPUCores:               classSpec.CPUCores,
+		MemoryMB:               classSpec.MemoryMB,
+		OSImage:                osImage,
+		DataVolumeRef:          inst.Status.Resources.DataVolumeName,
+		DataVolumeSizeGB:       inst.Spec.AllocatedStorage,
+		DataVolumeStorageClass: storageType,
+		NADName:                inst.Status.Resources.NADName,
+		MasterUser:             masterUser,
+		DBName:                 dbName,
+		Port:                   specPort(inst.Spec.Port),
+		MaxConnections:         classSpec.MaxConnections,
+		BackupEnabled:          inst.Spec.BackupRetentionPeriod > 0,
+		BackupWindow:           inst.Spec.PreferredBackupWindow,
+		S3Config:               inst.Spec.S3BackupConfig,
+		VMPassword:             inst.Spec.VMPassword,
+		StaticNetwork:          inst.Spec.StaticNetwork,
+		DNSServerIP:            inst.Spec.DNSServerIP,
 	})
+	// Record resource refs even on partial failure: the names are deterministic
+	// and returned regardless of err, so persisting them here lets the finalizer
+	// (TeardownAll) clean up any Secret/VM created before the error instead of
+	// leaking them. Deleting a not-yet-created name is a no-op (NotFound ignored).
+	inst.Status.Resources.VMName = vmName
+	inst.Status.Resources.SecretName = credSecretName
+	inst.Status.Resources.CloudInitSecretName = cloudInitSecretName
 	if err != nil {
 		return r.fail(ctx, inst, "VMCreateFailed", err)
 	}
 
-	inst.Status.Resources.VMName = vmName
-	inst.Status.Resources.SecretName = credSecretName
-	inst.Status.Resources.CloudInitSecretName = cloudInitSecretName
 	inst.Status.CACertPEM = caCertPEM
 	inst.Status.MasterUserSecret = &dbaasv1.MasterUserSecretRef{
 		Name:   credSecretName,
@@ -279,14 +310,20 @@ func (r *DBInstanceReconciler) phaseVM(ctx context.Context, inst *dbaasv1.DBInst
 	return ctrl.Result{RequeueAfter: 10 * time.Second}, r.statusUpdate(ctx, inst)
 }
 
+// phaseWaitReady is a single "waiting for the VM to become ready" phase: the
+// instance stays in PhaseVMCreated throughout and the two readiness gates are
+// distinguished only by status.Message, not by a separate provisioning phase.
+// (PhaseWaitingForCloudInit is no longer written — it is still recognised by the
+// dispatcher so any in-flight CR carrying the old value still routes here — and
+// the name was misleading anyway: this phase is also re-entered on restarts,
+// where cloud-init never re-runs.)
 func (r *DBInstanceReconciler) phaseWaitReady(ctx context.Context, inst *dbaasv1.DBInstance) (ctrl.Result, error) {
 	ns := inst.Namespace
 
-	// First gate: VMI is Running and the qemu-guest-agent has reported an IP.
+	// First gate: VMI is Running and the qemu-guest-agent has reported a data-net IP.
 	readiness, err := r.Harvester.GetVMIReadiness(ctx, ns, inst.Status.Resources.VMName)
 	if err != nil || !readiness.Running || readiness.IP == "" {
-		inst.Status.Message = "Waiting for VM to become ready"
-		inst.Status.ProvisioningPhase = dbaasv1.PhaseWaitingForCloudInit
+		inst.Status.Message = "VM booting; waiting for guest agent and data-net IP"
 		_ = r.statusUpdate(ctx, inst)
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
@@ -297,23 +334,11 @@ func (r *DBInstanceReconciler) phaseWaitReady(ctx context.Context, inst *dbaasv1
 		dbName = inst.Name
 	}
 
-	// Second gate: PostgreSQL is actually accepting TCP connections on its
-	// listener. The guest-agent IP alone is too weak — the agent starts as
-	// soon as `apt install` finishes, well before bootstrap.sh has moved
-	// pgdata onto the dedicated disk, restarted postgres, and created the
-	// admin role. A pure VMI-readiness gate has previously let a broken
-	// postgres slip through as "available".
-	//
-	// The probe is a net.DialTimeout from inside the controller process
-	// against the VM's mgmt-net pod-network IP (see harvester.DialVMListener
-	// for why). TCP-only — not a SQL ping — keeps the controller free of
-	// a DB driver dependency; postgres opens its listener only when it
-	// is genuinely ready to accept SQL, so a successful dial is a
-	// sufficient signal.
-	if derr := probeListener(r.Harvester, ctx, ns, inst.Status.Resources.VMName, port); derr != nil {
-		inst.Status.Message = fmt.Sprintf("Waiting for PostgreSQL listener at %s:%d: %v",
-			readiness.IP, port, derr)
-		inst.Status.ProvisioningPhase = dbaasv1.PhaseWaitingForCloudInit
+	// Second gate: KubeVirt's VMI readiness probe (pg_isready via QGA virtio
+	// channel) has passed. The probe is defined on the VM spec and runs inside
+	// the guest — no pod-network port exposure required.
+	if !readiness.Ready {
+		inst.Status.Message = fmt.Sprintf("PostgreSQL initializing; readiness probe not passing at %s:%d", readiness.IP, port)
 		_ = r.statusUpdate(ctx, inst)
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
@@ -364,32 +389,139 @@ func (r *DBInstanceReconciler) phaseMonitoring(ctx context.Context, inst *dbaasv
 }
 
 func (r *DBInstanceReconciler) phaseAvailable(ctx context.Context, inst *dbaasv1.DBInstance) (ctrl.Result, error) {
-	// Snapshot the current status before mutating so we can skip the
-	// kube-apiserver round-trip when nothing actually changed. This phase
-	// runs on every 60s requeue for the lifetime of every Available
-	// DBInstance; a churn-free reconcile keeps audit-log volume and
-	// watch-event fanout down for clusters with many databases.
+	// Snapshot before any mutation so we can skip the kube-apiserver round-trip when nothing changed. This runs on every ~60 s requeue for every Available DBInstance.
 	prev := inst.Status.DeepCopy()
+	ns := inst.Namespace
+	vmName := inst.Status.Resources.VMName
 
 	inst.Status.Phase = dbaasv1.StatusAvailable
 	inst.Status.ProvisioningPhase = dbaasv1.PhaseAvailable
 	inst.Status.ObservedGeneration = inst.Generation
 	inst.Status.Message = "Database instance is available"
 
-	// On first entry to Available, delete the ephemeral cloud-init Secret so
-	// the installation script and embedded passwords are not left on-cluster.
+	// On first entry to Available, scrub the ephemeral cloud-init Secret to prevent failed mount scenario
+	// If disk removal fails we leave the secret in place and retry next reconcile.
 	if ciName := inst.Status.Resources.CloudInitSecretName; ciName != "" {
-		if delErr := r.Harvester.DeleteSecret(ctx, inst.Namespace, ciName); delErr != nil {
+		if removeErr := r.Harvester.RemoveCloudInitDisk(ctx, ns, vmName); removeErr != nil {
+			log.FromContext(ctx).Error(removeErr, "failed to remove cloud-init disk from VM spec (will retry)", "vm", vmName)
+		} else if delErr := r.Harvester.DeleteSecret(ctx, ns, ciName); delErr != nil {
 			log.FromContext(ctx).Error(delErr, "failed to delete cloud-init secret (non-fatal)", "secret", ciName)
 		} else {
 			inst.Status.Resources.CloudInitSecretName = ""
 		}
 	}
 
-	// Re-check the data-net IP on every requeue — the guest agent may
-	// report it later than initial readiness, or it can change after a VM
-	// restart.
-	readiness, _ := r.Harvester.GetVMIReadiness(ctx, inst.Namespace, inst.Status.Resources.VMName)
+	// Single VMI fetch used for both liveness monitoring and endpoint refresh.
+	readiness, readinessErr := r.Harvester.GetVMIReadiness(ctx, ns, vmName)
+	if readinessErr != nil {
+		log.FromContext(ctx).Error(readinessErr, "GetVMIReadiness failed (non-fatal)")
+	}
+
+	// -------------------------------------------------------------------------
+	// Liveness monitoring
+	// -------------------------------------------------------------------------
+
+	// UID check: detect unplanned restarts. A new UID means the VMI object was
+	// deleted and recreated (QEMU crash, OS panic, RunStrategyAlways auto-recovery).
+	// This is distinct from a live migration, which does not change the UID.(Evidence ?)
+	if readiness.VMIUID != "" {
+		if inst.Status.LastKnownVMIUID == "" {
+			// First entry to phaseAvailable — snapshot the running VMI's UID.
+			inst.Status.LastKnownVMIUID = readiness.VMIUID
+
+		} else if inst.Status.LastKnownVMIUID != readiness.VMIUID {
+			log.FromContext(ctx).Info("unplanned VMI restart detected","oldUID", inst.Status.LastKnownVMIUID, "newUID", readiness.VMIUID)
+			r.Recorder.Eventf(inst, corev1.EventTypeWarning, dbaasv1.ReasonVMRestarting,"Unplanned VMI restart detected (UID %s → %s)",inst.Status.LastKnownVMIUID, readiness.VMIUID)
+			inst.Status.RestartCount++ //for observerability only , no-op
+			inst.Status.LastKnownVMIUID = readiness.VMIUID
+
+			// Crash-loop detection: chain-count unplanned restarts
+			// Each one within crashLoopWindow of the previous extends the chain.
+			// quiet gap longer than the window starts a new chain.
+			now := metav1.Now()
+			if inst.Status.LastUnplannedRestartTime != nil &&
+				now.Sub(inst.Status.LastUnplannedRestartTime.Time) < crashLoopWindow {
+				inst.Status.RecentUnplannedRestarts++
+			} else {
+				inst.Status.RecentUnplannedRestarts = 1
+			}
+			inst.Status.LastUnplannedRestartTime = &now
+
+			if inst.Status.RecentUnplannedRestarts >= crashLoopThreshold {
+				termMsg := fmt.Sprintf("VM crash loop: %d unplanned restarts, each within %s of the previous; VM halted, manual intervention required",
+					inst.Status.RecentUnplannedRestarts, crashLoopWindow)
+				// Halt the VM before declaring failed: under RunStrategyAlways KubeVirt keep restarting it forever. 
+				// If StopVM fails , return without no status update , retry with next reconcile.
+				if err := r.Harvester.StopVM(ctx, ns, vmName); err != nil {
+					log.FromContext(ctx).Error(err, "StopVM failed during crash-loop halt (will retry)")
+					return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+				}
+				r.Recorder.Eventf(inst, corev1.EventTypeWarning, dbaasv1.ReasonCrashLoopDetected, "%s", termMsg)
+				setCondition(inst, dbaasv1.ConditionFailed, metav1.ConditionTrue,
+					dbaasv1.ReasonCrashLoopDetected, termMsg)
+				removeCondition(inst, dbaasv1.ConditionDegraded)
+				inst.Status.Phase = dbaasv1.StatusFailed
+				inst.Status.ProvisioningPhase = dbaasv1.PhaseFailed
+				inst.Status.Message = termMsg
+				_ = r.statusUpdate(ctx, inst)
+				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+			}
+
+			inst.Status.ProvisioningPhase = dbaasv1.PhaseVMCreated
+			inst.Status.Message = "Unplanned VM restart detected; waiting for readiness"
+			_ = r.statusUpdate(ctx, inst) // go back to phaseVMCreated -> phaseWaitReady
+			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		}
+	}
+
+	// Liveness (report-only). The KubeVirt readiness probe (pg_isready via the
+	// guest agent, FailureThreshold=12 @ 10s ≈ 2 min) already debounces transient
+	// failures, so Ready is authoritative — no controller-side counting. We never
+	// restart the VM here.
+	//
+	// ASSUMPTION (must hold for this design): our readiness probe is an Exec
+	// probe, which KubeVirt runs *inside the guest via the qemu-guest-agent*.
+	// So when AgentConnected=False the probe physically cannot execute, KubeVirt
+	// scores those attempts as failures, and Ready flips False after
+	// FailureThreshold. We therefore treat Ready as the single health signal and
+	// use AgentConnected only to *attribute* a failure (agent fault vs DB fault),
+	// never as a separately-debounced signal. If a future KubeVirt version froze
+	// Ready stale-True (or "Unknown") on agent loss instead of failing the probe,
+	// this block would under-report a pure guest-agent outage and would need an
+	// AgentConnected-based debounce of its own. Verify on cluster: kill
+	// qemu-guest-agent in a Ready VM and confirm .status.conditions[Ready] flips
+	// False within ~FailureThreshold*PeriodSeconds.
+	//
+	// Skip entirely when the VMI fetch failed: a missing observation is not a
+	// health signal, so we leave any existing Degraded condition untouched.
+	if readinessErr == nil {
+		if readiness.Ready {
+			removeCondition(inst, dbaasv1.ConditionDegraded) // healthy — clear Degraded if it was set
+		} else {
+			reason := dbaasv1.ReasonPostgresUnreachable
+			unhealthyMsg := "PostgreSQL readiness probe failing; database not accepting connections"
+			if !readiness.AgentConnected {
+				reason = dbaasv1.ReasonGuestAgentDisconnected
+				unhealthyMsg = "Guest agent disconnected; cannot run readiness probe — database health unknown"
+			}
+			// Emit a Warning only when entering Degraded or when the cause changes,
+			// not on every reconcile. The condition (and its LastTransitionTime)
+			// carries the persistent signal; spamming events/status each pass would
+			// also defeat the DeepEqual write-skip and self-trigger reconciles.
+			if !hasConditionReason(inst, dbaasv1.ConditionDegraded, reason) {
+				r.Recorder.Eventf(inst, corev1.EventTypeWarning, reason, "%s", unhealthyMsg)
+			}
+			setCondition(inst, dbaasv1.ConditionDegraded, metav1.ConditionTrue, reason, unhealthyMsg)
+			inst.Status.Message = unhealthyMsg
+		}
+	}
+
+	// -------------------------------------------------------------------------
+	// Endpoint refresh and Prometheus monitoring
+	// -------------------------------------------------------------------------
+
+	// Re-check the data-net IP on every requeue — it can change after a VM
+	// restart or live migration. update the Endpoint if it changed.
 	if readiness.IP != "" && (inst.Status.Endpoint == nil || inst.Status.Endpoint.Address != readiness.IP) {
 		port := specPort(inst.Spec.Port)
 		dbName := inst.Spec.DBName
@@ -405,7 +537,8 @@ func (r *DBInstanceReconciler) phaseAvailable(ctx context.Context, inst *dbaasv1
 	}
 
 	if inst.Status.Endpoint != nil && inst.Status.Endpoint.Address != "" {
-		svcName, smName, grafanaURL, promTarget, err := r.Harvester.DeployMonitoring(ctx, inst.Name, inst.Namespace, inst.Status.Endpoint.Address)
+		// update the monitoring stack with the new endpoint IP if it changed. DeployMonitoring is idempotent and handles the case where the Service already exists, so we can call it on every Available reconcile to ensure the monitoring stack tracks the current endpoint.
+		svcName, smName, grafanaURL, promTarget, err := r.Harvester.DeployMonitoring(ctx, inst.Name, ns, inst.Status.Endpoint.Address)
 		if err != nil {
 			log.FromContext(ctx).Error(err, "monitoring refresh failed (non-fatal)")
 		} else {
@@ -438,19 +571,55 @@ func (r *DBInstanceReconciler) reconcileStop(ctx context.Context, inst *dbaasv1.
 			fmt.Errorf("cannot modify field(s) %s while stopping; revert or recreate the DBInstance", drift))
 	}
 
-	ns := inst.Namespace
-	inst.Status.Phase = dbaasv1.StatusStopping
-	inst.Status.Message = "Stopping VM"
-	_ = r.statusUpdate(ctx, inst)
-
-	if err := r.Harvester.StopVM(ctx, ns, inst.Status.Resources.VMName); err != nil {
+	if err := r.Harvester.StopVM(ctx, inst.Namespace, inst.Status.Resources.VMName); err != nil {
 		return r.fail(ctx, inst, "StopFailed", err)
 	}
 
+	// Single atomic status write — no persistent phase=stopping intermediate.
+	// KI-005: a stale "stopping" snapshot in statusUpdate's retry loop could
+	// overwrite "stopped" and leave the dispatcher with no matching branch.
+	// ProvisioningPhase=Stopped moves the instance out of phaseAvailable's
+	// dispatch domain, so the RF-1 resurrection loop cannot fire.
 	inst.Status.Phase = dbaasv1.StatusStopped
+	inst.Status.ProvisioningPhase = dbaasv1.PhaseStopped
 	inst.Status.Message = "Stopped. Storage preserved."
 	inst.Status.ObservedGeneration = inst.Generation
+	removeCondition(inst, dbaasv1.ConditionDegraded)
 	return ctrl.Result{}, r.statusUpdate(ctx, inst)
+}
+
+// phaseStopped is the idle state for a halted instance. The only exit is
+// spec.running flipping back to true, which re-enters the provisioning chain
+// via reconcileStart. No requeue while halted — spec edits trigger
+// event-driven reconciles.
+func (r *DBInstanceReconciler) phaseStopped(ctx context.Context, inst *dbaasv1.DBInstance) (ctrl.Result, error) {
+	if inst.Spec.Running == nil || *inst.Spec.Running {
+		return r.reconcileStart(ctx, inst)
+	}
+	return ctrl.Result{}, nil
+}
+
+// phaseFailed parks an instance that gave up (crash-loop halt, or a fatal
+// provisioning/lifecycle error via fail()). Instead of dead-ending (RF-6), it
+// probes the VMI every 30s: if an operator repairs the guest or starts the VM
+// out-of-band and it comes back fully healthy, the instance clears Failed and
+// re-enters the provisioning chain. A crash-loop-halted VM stays halted until
+// that out-of-band start, by design. No status writes happen while still
+// unhealthy, so the loop stays cold (30s requeues only).
+func (r *DBInstanceReconciler) phaseFailed(ctx context.Context, inst *dbaasv1.DBInstance) (ctrl.Result, error) {
+	readiness, err := r.Harvester.GetVMIReadiness(ctx, inst.Namespace, inst.Status.Resources.VMName)
+	if err != nil || !readiness.Running || !readiness.Ready || !readiness.AgentConnected {
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	r.Recorder.Eventf(inst, corev1.EventTypeNormal, dbaasv1.ReasonRecovered,
+		"VM healthy again after failed state; re-entering provisioning chain")
+	removeCondition(inst, dbaasv1.ConditionFailed)
+	inst.Status.LastKnownVMIUID = "" // re-snapshot the recovered VMI on Available re-entry
+	inst.Status.Phase = dbaasv1.StatusStarting
+	inst.Status.ProvisioningPhase = dbaasv1.PhaseVMCreated
+	inst.Status.Message = "VM healthy again; re-validating readiness"
+	return ctrl.Result{RequeueAfter: 10 * time.Second}, r.statusUpdate(ctx, inst)
 }
 
 func (r *DBInstanceReconciler) reconcileStart(ctx context.Context, inst *dbaasv1.DBInstance) (ctrl.Result, error) {
@@ -461,17 +630,34 @@ func (r *DBInstanceReconciler) reconcileStart(ctx context.Context, inst *dbaasv1
 	}
 
 	ns := inst.Namespace
-	inst.Status.Phase = dbaasv1.StatusStarting
-	_ = r.statusUpdate(ctx, inst)
+	vmName := inst.Status.Resources.VMName
 
-	if err := r.Harvester.StartVM(ctx, ns, inst.Status.Resources.VMName); err != nil {
+	// StopVM only sets RunStrategy=Halted; the VMI tears down asynchronously
+	// and KubeVirt's start subresource rejects calls while a VMI object still
+	// exists. Wait for teardown to finish (same guard as reconcileModify).
+	// Phase stays stopped/Stopped so the dispatcher re-enters here.
+	readiness, vmiErr := r.Harvester.GetVMIReadiness(ctx, ns, vmName)
+	if vmiErr != nil && !errors.IsNotFound(vmiErr) {
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	}
+	if readiness.Running {
+		inst.Status.Message = "Waiting for VM to finish stopping before start"
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, r.statusUpdate(ctx, inst)
+	}
+
+	if err := r.Harvester.StartVM(ctx, ns, vmName); err != nil {
 		return r.fail(ctx, inst, "StartFailed", err)
 	}
 
-	inst.Status.Phase = dbaasv1.StatusAvailable
-	inst.Status.Message = "Started"
+	// Re-enter the provisioning chain instead of declaring available here:
+	// phaseWaitReady gates on VMI readiness + the PostgreSQL probe, and
+	// phaseAvailable stamps phase=available only once the DB is actually up.
+	inst.Status.Phase = dbaasv1.StatusStarting
+	inst.Status.ProvisioningPhase = dbaasv1.PhaseVMCreated
 	inst.Status.ObservedGeneration = inst.Generation
-	return ctrl.Result{}, r.statusUpdate(ctx, inst)
+	inst.Status.LastKnownVMIUID = "" // planned start — don't count it as an unplanned restart
+	inst.Status.Message = "Starting; waiting for VM to become ready"
+	return ctrl.Result{RequeueAfter: 10 * time.Second}, r.statusUpdate(ctx, inst)
 }
 
 func (r *DBInstanceReconciler) reconcileModify(ctx context.Context, inst *dbaasv1.DBInstance) (ctrl.Result, error) {
@@ -494,30 +680,45 @@ func (r *DBInstanceReconciler) reconcileModify(ctx context.Context, inst *dbaasv
 		return r.fail(ctx, inst, "InvalidClass", fmt.Errorf("unknown class: %s", inst.Spec.DBInstanceClass))
 	}
 
-	var wg sync.WaitGroup
-	var vmErr, dvErr error
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		vmErr = r.Harvester.ResizeVM(ctx, ns, inst.Status.Resources.VMName, classSpec.CPUCores, classSpec.MemoryMB)
-	}()
-	go func() {
-		defer wg.Done()
-		dvErr = r.Harvester.ResizeDataVolume(ctx, ns, inst.Status.Resources.DataVolumeName, inst.Spec.AllocatedStorage)
-	}()
-	wg.Wait()
+	vmName := inst.Status.Resources.VMName
 
-	if vmErr != nil {
-		return r.fail(ctx, inst, "ResizeVMFailed", vmErr)
-	}
-	if dvErr != nil {
-		return r.fail(ctx, inst, "ResizeStorageFailed", dvErr)
+	// Cold resize: ensure VM is halted (idempotent — safe to call on an already-halted VM).
+	if err := r.Harvester.StopVM(ctx, ns, vmName); err != nil {
+		return r.fail(ctx, inst, "ResizeStopFailed", err)
 	}
 
-	inst.Status.Phase = dbaasv1.StatusAvailable
-	inst.Status.Message = fmt.Sprintf("Resized to %s, %dGiB", inst.Spec.DBInstanceClass, inst.Spec.AllocatedStorage)
+	// Wait for the VMI to actually terminate before applying spec changes.
+	// Setting RunStrategy=Halted is asynchronous: the VMI can take 5–30s to
+	// stop. KubeVirt's start subresource rejects calls while a VMI object
+	// exists. StopVM is idempotent so re-calling on each re-queue is safe.
+	readiness, vmiErr := r.Harvester.GetVMIReadiness(ctx, ns, vmName)
+	if vmiErr != nil && !errors.IsNotFound(vmiErr) {
+		// Transient API error — re-queue without failing.
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	}
+	if readiness.Running {
+		inst.Status.Phase = dbaasv1.StatusModifying
+		inst.Status.Message = fmt.Sprintf("Waiting for VM to stop before resize to %s", inst.Spec.DBInstanceClass)
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, r.statusUpdate(ctx, inst)
+	}
+
+	if err := r.Harvester.ResizeVM(ctx, ns, vmName, classSpec.CPUCores, classSpec.MemoryMB); err != nil {
+		return r.fail(ctx, inst, "ResizeVMFailed", fmt.Errorf("VM is halted; %w", err))
+	}
+	if err := r.Harvester.ResizeDataVolume(ctx, ns, vmName, inst.Status.Resources.DataVolumeName, inst.Spec.AllocatedStorage); err != nil {
+		return r.fail(ctx, inst, "ResizeStorageFailed", fmt.Errorf("VM is halted; %w", err))
+	}
+
+	if err := r.Harvester.StartVM(ctx, ns, vmName); err != nil {
+		return r.fail(ctx, inst, "ResizeStartFailed", fmt.Errorf("resize applied but VM failed to start; %w", err))
+	}
+
+	// Wait for the VM to become ready via the normal provisioning path.
 	inst.Status.ObservedGeneration = inst.Generation
-	return ctrl.Result{}, r.statusUpdate(ctx, inst)
+	inst.Status.LastKnownVMIUID = ""
+	inst.Status.ProvisioningPhase = dbaasv1.PhaseVMCreated
+	inst.Status.Message = fmt.Sprintf("Resized to %s, %dGiB; waiting for VM", inst.Spec.DBInstanceClass, inst.Spec.AllocatedStorage)
+	return ctrl.Result{RequeueAfter: 10 * time.Second}, r.statusUpdate(ctx, inst)
 }
 
 // immutableDrift returns a comma-separated list of immutable spec fields
@@ -629,7 +830,7 @@ func (r *DBInstanceReconciler) reconcileDelete(ctx context.Context, inst *dbaasv
 // ============================================================
 
 func (r *DBInstanceReconciler) advance(ctx context.Context, inst *dbaasv1.DBInstance) (ctrl.Result, error) {
-	return ctrl.Result{Requeue: true}, r.statusUpdate(ctx, inst)
+	return ctrl.Result{Requeue: true}, r.statusUpdate(ctx, inst)  // Requeue : true is depreceated need to decide on timing.
 }
 
 func (r *DBInstanceReconciler) fail(ctx context.Context, inst *dbaasv1.DBInstance, reason string, err error) (ctrl.Result, error) {
@@ -637,11 +838,23 @@ func (r *DBInstanceReconciler) fail(ctx context.Context, inst *dbaasv1.DBInstanc
 	inst.Status.ProvisioningPhase = dbaasv1.PhaseFailed
 	inst.Status.Message = fmt.Sprintf("%s: %v", reason, err)
 	_ = r.statusUpdate(ctx, inst)
-	return ctrl.Result{RequeueAfter: 30 * time.Second}, err
+	// Return zero Result: controller-runtime ignores Result when error is
+	// non-nil and applies exponential backoff requeue instead.
+	return ctrl.Result{}, err
 }
 
 func (r *DBInstanceReconciler) statusUpdate(ctx context.Context, inst *dbaasv1.DBInstance) error {
-	return r.Status().Update(ctx, inst)
+	desired := inst.Status.DeepCopy()
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		// Re-fetch on every attempt to get a current resourceVersion.
+		// The informer cache typically reflects writes within a few hundred ms;
+		// DefaultRetry's backoff (10ms → 160ms, 5 attempts) covers that window.
+		if err := r.Get(ctx, client.ObjectKeyFromObject(inst), inst); err != nil {
+			return err
+		}
+		inst.Status = *desired
+		return r.Status().Update(ctx, inst)
+	})
 }
 
 // specPort returns 5432 if port is 0, otherwise port.
@@ -652,8 +865,55 @@ func specPort(port int) int {
 	return port
 }
 
+// setCondition adds or updates a condition in inst.Status.Conditions.
+// LastTransitionTime is only bumped when Status changes.
+func setCondition(inst *dbaasv1.DBInstance, condType string, status metav1.ConditionStatus, reason, msg string) {
+	now := metav1.Now()
+	for i, c := range inst.Status.Conditions {
+		if c.Type == condType {
+			if c.Status != status {
+				inst.Status.Conditions[i].LastTransitionTime = now
+			}
+			inst.Status.Conditions[i].Status = status
+			inst.Status.Conditions[i].Reason = reason
+			inst.Status.Conditions[i].Message = msg
+			return
+		}
+	}
+	inst.Status.Conditions = append(inst.Status.Conditions, metav1.Condition{
+		Type:               condType,
+		Status:             status,
+		Reason:             reason,
+		Message:            msg,
+		LastTransitionTime: now,
+	})
+}
+
+// hasConditionReason reports whether a condition of condType is present, True,
+// and carries the given reason. Used to emit Warning events only on a Degraded
+// transition (entry or cause change) rather than on every reconcile.
+func hasConditionReason(inst *dbaasv1.DBInstance, condType, reason string) bool {
+	for _, c := range inst.Status.Conditions {
+		if c.Type == condType {
+			return c.Status == metav1.ConditionTrue && c.Reason == reason
+		}
+	}
+	return false
+}
+
+// removeCondition removes a condition by type from inst.Status.Conditions.
+func removeCondition(inst *dbaasv1.DBInstance, condType string) {
+	for i, c := range inst.Status.Conditions {
+		if c.Type == condType {
+			inst.Status.Conditions = append(inst.Status.Conditions[:i], inst.Status.Conditions[i+1:]...)
+			return
+		}
+	}
+}
+
 // SetupWithManager registers the reconciler with controller-runtime.
 func (r *DBInstanceReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	r.Recorder = mgr.GetEventRecorderFor("dbaas-controller")
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&dbaasv1.DBInstance{}).
 		Named("dbinstance").

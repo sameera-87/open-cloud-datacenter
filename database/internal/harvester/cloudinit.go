@@ -31,26 +31,17 @@ import (
 // `config` stage, after `apt update` has already failed for lack of
 // routing.)
 //
-// Two interfaces:
-//   - enp1s0 (data-net): tenant client traffic. DHCP unless
-//     StaticNetwork is set, in which case the supplied address /
-//     gateway / DNS are written as static config.
-//   - enp2s0 (mgmt-net): controller-facing and the VM's first-boot
-//     egress path. Always DHCP — KubeVirt's masquerade hands out an
-//     internal address (10.0.2.0/30) from inside the launcher pod.
-//
-// Interface names rather than driver/MAC matchers: KubeVirt assigns
-// PCI slots in interface declaration order (see vmInterfaces), so
-// data → enp1s0 and mgmt → enp2s0 deterministically. Matching by
-// driver "virtio_net" would catch both NICs and apply the same config
-// to both, which is wrong.
+// Single interface:
+//   - enp1s0 (data-net): tenant client traffic and first-boot egress
+//     for apt installs. DHCP unless StaticNetwork is set, in which
+//     case the supplied address / gateway / DNS are written as static
+//     config. The data VLAN must have internet connectivity for
+//     cloud-init package installation to succeed.
 func buildNetworkData(p VMCreateParams) string {
 	if p.StaticNetwork == nil {
 		return `version: 2
 ethernets:
   enp1s0:
-    dhcp4: true
-  enp2s0:
     dhcp4: true
 `
 	}
@@ -69,8 +60,6 @@ ethernets:
         via: %s
     nameservers:
       addresses: [%s]%s
-  enp2s0:
-    dhcp4: true
 `,
 		ns.Address,
 		ns.Gateway,

@@ -100,7 +100,7 @@ type Client struct {
 	MgmtLogicalSwitch string
 }
 
-var _ Interface = (*Client)(nil)
+var _ ClientInterface = (*Client)(nil)
 
 func NewClient(dyn dynamic.Interface, grafanaURL string) *Client {
 	return &Client{Dynamic: dyn, GrafanaURL: grafanaURL}
@@ -108,21 +108,23 @@ func NewClient(dyn dynamic.Interface, grafanaURL string) *Client {
 
 // VMCreateParams bundles everything needed to create a PostgreSQL VM.
 type VMCreateParams struct {
-	ID             string
-	Namespace      string
-	CPUCores       int
-	MemoryMB       int
-	OSImage        string
-	DataVolumeRef  string
-	NADName        string
-	MasterUser     string
-	DBName         string
-	Port           int
-	MaxConnections int
-	BackupEnabled  bool
-	BackupWindow   string
-	S3Config       *dbaasv1.S3BackupConfig
-	VMPassword     string
+	ID                     string
+	Namespace              string
+	CPUCores               int
+	MemoryMB               int
+	OSImage                string
+	DataVolumeRef          string
+	DataVolumeSizeGB       int
+	DataVolumeStorageClass string
+	NADName                string
+	MasterUser             string
+	DBName                 string
+	Port                   int
+	MaxConnections         int
+	BackupEnabled          bool
+	BackupWindow           string
+	S3Config               *dbaasv1.S3BackupConfig
+	VMPassword             string
 	// StaticNetwork, when non-nil, makes the cloud-init netplan use a
 	// static IPv4 config instead of DHCP. Used on VLANs without a DHCP
 	// server.
@@ -135,13 +137,20 @@ type VMCreateParams struct {
 	DNSServerIP string
 }
 
-// VMIReadiness bundles phase + IP from a single VMI fetch. The IP being
-// populated is itself a strong readiness signal: qemu-guest-agent registers
-// it only after our bootstrap.sh has finished `apt install postgresql ...`
-// and started the agent — so the caller does not need an extra timer.
+// VMIReadiness bundles the VMI state fields needed for phase gating and
+// liveness monitoring from a single VMI fetch.
+//
+//   - Running: VMI phase is Running.
+//   - IP: data-network IP reported by the guest agent; empty until QGA populates it.
+//   - Ready: VMI readiness condition is True (readiness probe has passed).
+//   - AgentConnected: QGA virtio channel is active.
+//   - VMIUID: VMI object UID; a change across reconciles indicates an unplanned restart.
 type VMIReadiness struct {
-	Running bool
-	IP      string
+	Running        bool
+	IP             string
+	Ready          bool
+	AgentConnected bool
+	VMIUID         string
 }
 
 // ============================================================
@@ -165,7 +174,7 @@ func (c *Client) CreateDataVolume(ctx context.Context, id, ns string, sizeGB int
 	return dvName, nil
 }
 
-func (c *Client) ResizeDataVolume(ctx context.Context, ns, dvName string, newSizeGB int) error {
+func (c *Client) ResizeDataVolume(ctx context.Context, ns, vmName, dvName string, newSizeGB int) error {
 	dv, err := c.Dynamic.Resource(dvGVR).Namespace(ns).Get(ctx, dvName, metav1.GetOptions{})
 	if err != nil {
 		return err
@@ -400,6 +409,10 @@ func (c *Client) CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName
 }
 
 // GetVMIReadiness fetches the VMI once and returns phase, IP, and postgres-readiness.
+//
+// NOTE: Ready, AgentConnected, and VMIUID are not yet populated by the dynamic
+// client. They will be added when the dynamic client is updated (see migration plan
+// Step 3 — dynamic client). The TypedClient implementation populates all fields.
 func (c *Client) GetVMIReadiness(ctx context.Context, ns, vmName string) (VMIReadiness, error) {
 	vmi, err := c.Dynamic.Resource(vmiGVR).Namespace(ns).Get(ctx, vmName, metav1.GetOptions{})
 	if err != nil {
@@ -624,6 +637,10 @@ func (c *Client) TeardownAll(ctx context.Context, id, ns string, refs dbaasv1.Re
 	}
 	return nil
 }
+
+// RemoveCloudInitDisk is a no-op on the dynamic client pending implementation.
+// The typed client (default) has the full implementation.
+func (c *Client) RemoveCloudInitDisk(_ context.Context, _, _ string) error { return nil }
 
 // DeleteSecret deletes a Secret, ignoring NotFound. Used by the controller to
 // clean up the ephemeral cloud-init Secret once the VM reaches Available.
