@@ -74,10 +74,16 @@ spec:
               allocatedStorage:
                 description: |-
                   AllocatedStorage in GiB.
-                  Mutable: changing this on an Available instance resizes the pgdata
-                  DataVolume (only larger values are accepted by CDI/Longhorn).
+                  Mutable but grow-only: changing this on an Available instance resizes the
+                  pgdata volume. Only larger values are accepted — Harvester/Longhorn ignore
+                  a request below the live PVC size, so a shrink would silently no-op. The
+                  CEL transition rule below rejects shrinks at apply time (evaluated on
+                  update only, so create is unaffected).
                 minimum: 1
                 type: integer
+                x-kubernetes-validations:
+                - message: allocatedStorage can only grow; shrinking is not supported
+                  rule: self >= oldSelf
               backupRetentionPeriod:
                 description: |-
                   BackupRetentionPeriod in days. 0 (default) = disabled.
@@ -380,20 +386,6 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
-              consecutiveRestartAttempts:
-                description: |-
-                  ConsecutiveRestartAttempts counts controller-initiated liveness restarts
-                  in the current unhealthy episode. Unlike RestartCount (cumulative,
-                  observability) this is the input to the max-restart guard and is reset
-                  to zero whenever the instance is observed fully healthy, so the guard
-                  reflects the current episode rather than lifetime history.
-                type: integer
-              consecutiveUnhealthyCount:
-                description: |-
-                  ConsecutiveUnhealthyCount is the number of consecutive phaseAvailable
-                  reconciles where the VMI was not fully healthy (Ready=False or
-                  AgentConnected=False). Reset to zero on any healthy reconcile or restart.
-                type: integer
               endpoint:
                 description: Endpoint is populated when the database is reachable.
                 properties:

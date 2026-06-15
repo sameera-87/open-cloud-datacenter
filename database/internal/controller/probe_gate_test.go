@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -76,7 +77,10 @@ func newWaitReadyReconciler(stub *stubHarvester) (*DBInstanceReconciler, *dbaasv
 	inst := &dbaasv1.DBInstance{
 		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "tenant-a", ResourceVersion: "1"},
 		Status: dbaasv1.DBInstanceStatus{
-			Resources: dbaasv1.ResourceRefs{VMName: "pg-orders"},
+			// phaseVM leaves the instance in PhaseVMCreated; phaseWaitReady keeps
+			// it there throughout the wait and distinguishes gates via Message.
+			ProvisioningPhase: dbaasv1.PhaseVMCreated,
+			Resources:         dbaasv1.ResourceRefs{VMName: "pg-orders"},
 		},
 	}
 	scheme := runtime.NewScheme()
@@ -102,8 +106,12 @@ func TestPhaseWaitReadyRequeuesWhenVMINotRunning(t *testing.T) {
 	if result.RequeueAfter != 10*time.Second {
 		t.Fatalf("RequeueAfter = %v, want 10s", result.RequeueAfter)
 	}
-	if inst.Status.ProvisioningPhase != dbaasv1.PhaseWaitingForCloudInit {
-		t.Fatalf("ProvisioningPhase = %q, want %q", inst.Status.ProvisioningPhase, dbaasv1.PhaseWaitingForCloudInit)
+	// Single wait phase: stays VMCreated; the gate is conveyed via Message.
+	if inst.Status.ProvisioningPhase != dbaasv1.PhaseVMCreated {
+		t.Fatalf("ProvisioningPhase = %q, want %q", inst.Status.ProvisioningPhase, dbaasv1.PhaseVMCreated)
+	}
+	if !strings.Contains(inst.Status.Message, "VM booting") {
+		t.Fatalf("Message = %q, want gate-1 (VM booting) message", inst.Status.Message)
 	}
 }
 
@@ -123,8 +131,12 @@ func TestPhaseWaitReadyRequeuesWhenReadinessProbeNotYetPassed(t *testing.T) {
 	if result.RequeueAfter != 10*time.Second {
 		t.Fatalf("RequeueAfter = %v, want 10s", result.RequeueAfter)
 	}
-	if inst.Status.ProvisioningPhase != dbaasv1.PhaseWaitingForCloudInit {
-		t.Fatalf("ProvisioningPhase = %q, want %q", inst.Status.ProvisioningPhase, dbaasv1.PhaseWaitingForCloudInit)
+	// Single wait phase: stays VMCreated; the gate is conveyed via Message.
+	if inst.Status.ProvisioningPhase != dbaasv1.PhaseVMCreated {
+		t.Fatalf("ProvisioningPhase = %q, want %q", inst.Status.ProvisioningPhase, dbaasv1.PhaseVMCreated)
+	}
+	if !strings.Contains(inst.Status.Message, "PostgreSQL initializing") {
+		t.Fatalf("Message = %q, want gate-2 (PostgreSQL initializing) message", inst.Status.Message)
 	}
 }
 

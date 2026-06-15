@@ -36,71 +36,9 @@ func hasCondition(inst *dbaasv1.DBInstance, condType string) bool {
 	return false
 }
 
-// TestLivenessGuardIgnoresLifetimeRestartCount is the KI-006 Problem B
-// regression: an instance with a large cumulative RestartCount (accumulated
-// from KubeVirt auto-recoveries) must still get its full restart budget for a
-// new unhealthy episode — not jump straight to failed.
-func TestLivenessGuardIgnoresLifetimeRestartCount(t *testing.T) {
-	stub := &stubHarvester{
-		readiness: harvester.VMIReadiness{Running: false, Ready: false, AgentConnected: false, VMIUID: ""},
-	}
-	r, inst := newAvailableReconciler(stub)
-	inst.Status.RestartCount = 6 // poisoned lifetime counter, double maxRestartCount
-	ctx := context.Background()
-
-	// Two unhealthy cycles reach the accelerated restartAt=2 threshold.
-	for i := 0; i < 2; i++ {
-		if _, err := r.phaseAvailable(ctx, inst); err != nil {
-			t.Fatalf("cycle %d error: %v", i+1, err)
-		}
-	}
-	if inst.Status.Phase == dbaasv1.StatusFailed {
-		t.Fatalf("instance declared failed from lifetime RestartCount with zero attempts this episode")
-	}
-	if stub.StartVMCalls != 1 {
-		t.Fatalf("StartVM called %d times, want 1 (restart budget must be episode-scoped)", stub.StartVMCalls)
-	}
-	if inst.Status.ConsecutiveRestartAttempts != 1 {
-		t.Fatalf("ConsecutiveRestartAttempts = %d, want 1", inst.Status.ConsecutiveRestartAttempts)
-	}
-	if inst.Status.RestartCount != 7 {
-		t.Fatalf("RestartCount = %d, want 7 (cumulative counter keeps counting)", inst.Status.RestartCount)
-	}
-}
-
-// TestLivenessGuardFailsAfterConsecutiveAttempts verifies the guard fires on
-// the episode counter and writes BOTH phase=failed and provisioningPhase=
-// Failed (the RF-7 TODO), without attempting another restart.
-func TestLivenessGuardFailsAfterConsecutiveAttempts(t *testing.T) {
-	stub := &stubHarvester{
-		readiness: harvester.VMIReadiness{Running: false, Ready: false, AgentConnected: false, VMIUID: ""},
-	}
-	r, inst := newAvailableReconciler(stub)
-	inst.Status.ConsecutiveRestartAttempts = maxRestartCount // budget exhausted this episode
-	ctx := context.Background()
-
-	for i := 0; i < 2; i++ {
-		if _, err := r.phaseAvailable(ctx, inst); err != nil {
-			t.Fatalf("cycle %d error: %v", i+1, err)
-		}
-	}
-	if inst.Status.Phase != dbaasv1.StatusFailed {
-		t.Fatalf("Phase = %q, want %q", inst.Status.Phase, dbaasv1.StatusFailed)
-	}
-	if inst.Status.ProvisioningPhase != dbaasv1.PhaseFailed {
-		t.Fatalf("ProvisioningPhase = %q, want %q (RF-7 TODO must be completed)", inst.Status.ProvisioningPhase, dbaasv1.PhaseFailed)
-	}
-	if stub.StartVMCalls != 0 {
-		t.Fatalf("StartVM called %d times, want 0 (budget exhausted)", stub.StartVMCalls)
-	}
-	if !hasCondition(inst, dbaasv1.ConditionFailed) {
-		t.Fatalf("ConditionFailed not set")
-	}
-}
-
 // TestFailedStateDoesNotHotLoop is the KI-007 regression: a failed instance
-// must idle on 30s requeues — no counter increments, no status writes, no VM
-// calls — instead of re-entering phaseAvailable on every status-write event.
+// must idle on 30s requeues — no status writes, no VM calls — instead of
+// re-entering phaseAvailable on every status-write event.
 func TestFailedStateDoesNotHotLoop(t *testing.T) {
 	stub := &stubHarvester{} // VMI unhealthy (zero readiness)
 	r, req := newStopStartReconciler(stub, true)
@@ -109,7 +47,7 @@ func TestFailedStateDoesNotHotLoop(t *testing.T) {
 	inst := getInst(t, r.Client)
 	inst.Status.Phase = dbaasv1.StatusFailed
 	inst.Status.ProvisioningPhase = dbaasv1.PhaseFailed
-	inst.Status.ConsecutiveUnhealthyCount = 5
+	inst.Status.Message = "seeded failed"
 	if err := r.Status().Update(ctx, inst); err != nil {
 		t.Fatalf("status seed: %v", err)
 	}
@@ -124,8 +62,8 @@ func TestFailedStateDoesNotHotLoop(t *testing.T) {
 		}
 	}
 	inst = getInst(t, r.Client)
-	if inst.Status.ConsecutiveUnhealthyCount != 5 {
-		t.Fatalf("ConsecutiveUnhealthyCount = %d, want 5 unchanged (hot loop must be dead)", inst.Status.ConsecutiveUnhealthyCount)
+	if inst.Status.Phase != dbaasv1.StatusFailed || inst.Status.ProvisioningPhase != dbaasv1.PhaseFailed {
+		t.Fatalf("parked instance drifted (phase=%q provisioning=%q), want failed/Failed", inst.Status.Phase, inst.Status.ProvisioningPhase)
 	}
 	if stub.StopVMCalls != 0 || stub.StartVMCalls != 0 {
 		t.Fatalf("VM calls while parked in failed (stop=%d start=%d), want none", stub.StopVMCalls, stub.StartVMCalls)
@@ -145,12 +83,10 @@ func TestPhaseFailedRecoversWhenHealthy(t *testing.T) {
 	inst := getInst(t, r.Client)
 	inst.Status.Phase = dbaasv1.StatusFailed
 	inst.Status.ProvisioningPhase = dbaasv1.PhaseFailed
-	inst.Status.ConsecutiveRestartAttempts = maxRestartCount
-	inst.Status.ConsecutiveUnhealthyCount = 5
 	inst.Status.Conditions = []metav1.Condition{{
 		Type:               dbaasv1.ConditionFailed,
 		Status:             metav1.ConditionTrue,
-		Reason:             dbaasv1.ReasonMaxRestartsExceeded,
+		Reason:             dbaasv1.ReasonCrashLoopDetected,
 		Message:            "seeded",
 		LastTransitionTime: metav1.Now(),
 	}}
@@ -167,9 +103,6 @@ func TestPhaseFailedRecoversWhenHealthy(t *testing.T) {
 	}
 	if inst.Status.Phase != dbaasv1.StatusStarting {
 		t.Fatalf("Phase = %q, want %q", inst.Status.Phase, dbaasv1.StatusStarting)
-	}
-	if inst.Status.ConsecutiveRestartAttempts != 0 || inst.Status.ConsecutiveUnhealthyCount != 0 {
-		t.Fatalf("episode counters not reset (attempts=%d unhealthy=%d)", inst.Status.ConsecutiveRestartAttempts, inst.Status.ConsecutiveUnhealthyCount)
 	}
 	if hasCondition(inst, dbaasv1.ConditionFailed) {
 		t.Fatalf("ConditionFailed still present after recovery")
@@ -249,24 +182,5 @@ func TestCrashLoopChainResetsAfterQuietGap(t *testing.T) {
 	}
 	if stub.StopVMCalls != 0 {
 		t.Fatalf("StopVM called %d times, want 0", stub.StopVMCalls)
-	}
-}
-
-// TestHealthyReconcileResetsRestartAttempts verifies the episode boundary: a
-// fully healthy phaseAvailable pass zeroes ConsecutiveRestartAttempts so the
-// next episode starts with a full budget.
-func TestHealthyReconcileResetsRestartAttempts(t *testing.T) {
-	stub := &stubHarvester{
-		readiness: harvester.VMIReadiness{Running: true, Ready: true, AgentConnected: true, VMIUID: "vmi-uid-abc"},
-	}
-	r, inst := newAvailableReconciler(stub)
-	inst.Status.ConsecutiveRestartAttempts = 2
-	ctx := context.Background()
-
-	if _, err := r.phaseAvailable(ctx, inst); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if inst.Status.ConsecutiveRestartAttempts != 0 {
-		t.Fatalf("ConsecutiveRestartAttempts = %d after healthy reconcile, want 0", inst.Status.ConsecutiveRestartAttempts)
 	}
 }

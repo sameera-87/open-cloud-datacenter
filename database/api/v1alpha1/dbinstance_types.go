@@ -94,10 +94,14 @@ type DBInstanceSpec struct {
 	MasterUserPasswordRef *SecretKeyRef `json:"masterUserPasswordRef,omitempty"`
 
 	// AllocatedStorage in GiB.
-	// Mutable: changing this on an Available instance resizes the pgdata
-	// DataVolume (only larger values are accepted by CDI/Longhorn).
+	// Mutable but grow-only: changing this on an Available instance resizes the
+	// pgdata volume. Only larger values are accepted — Harvester/Longhorn ignore
+	// a request below the live PVC size, so a shrink would silently no-op. The
+	// CEL transition rule below rejects shrinks at apply time (evaluated on
+	// update only, so create is unaffected).
 	// +required
 	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:XValidation:rule="self >= oldSelf",message="allocatedStorage can only grow; shrinking is not supported"
 	AllocatedStorage int `json:"allocatedStorage"`
 
 	// StorageType maps to a Longhorn StorageClass. Default "longhorn".
@@ -310,18 +314,6 @@ type DBInstanceStatus struct {
 	// +optional
 	LastKnownVMIUID string `json:"lastKnownVMIUID,omitempty"`
 
-	// ConsecutiveUnhealthyCount is the number of consecutive phaseAvailable
-	// reconciles where the VMI was not fully healthy (Ready=False or
-	// AgentConnected=False). Reset to zero on any healthy reconcile or restart.
-	// +optional
-	ConsecutiveUnhealthyCount int `json:"consecutiveUnhealthyCount,omitempty"`
-	// ConsecutiveRestartAttempts counts controller-initiated liveness restarts
-	// in the current unhealthy episode. Unlike RestartCount (cumulative,
-	// observability) this is the input to the max-restart guard and is reset
-	// to zero whenever the instance is observed fully healthy, so the guard
-	// reflects the current episode rather than lifetime history.
-	// +optional
-	ConsecutiveRestartAttempts int `json:"consecutiveRestartAttempts,omitempty"`
 	// LastUnplannedRestartTime is when the controller last observed an
 	// unplanned VMI restart (UID change). Input to crash-loop detection.
 	// +optional
@@ -461,14 +453,13 @@ const (
 
 	// Condition type constants for DBInstance liveness monitoring.
 	// These are the Type field of entries in Status.Conditions.
-	ConditionDegraded = "Degraded" // VMI unhealthy for N consecutive reconciles
-	ConditionFailed   = "Failed"   // restart count exceeded the maximum
+	ConditionDegraded = "Degraded" // readiness probe failing or guest agent disconnected (report-only)
+	ConditionFailed   = "Failed"   // crash-loop give-up, or a fatal provisioning error
 
 	// Condition reason constants (Conditions[].Reason).
 	ReasonPostgresUnreachable    = "PostgresUnreachable"
 	ReasonGuestAgentDisconnected = "GuestAgentDisconnected"
 	ReasonVMRestarting           = "VMRestarting"
-	ReasonMaxRestartsExceeded    = "MaxRestartsExceeded"
 	ReasonCrashLoopDetected      = "CrashLoopDetected"
 	ReasonRecovered              = "Recovered"
 

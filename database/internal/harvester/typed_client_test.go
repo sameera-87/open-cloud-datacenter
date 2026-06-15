@@ -126,6 +126,50 @@ func TestTypedCreatePostgresVMCreatesBothSecretsAndReturnsCA(t *testing.T) {
 	}
 }
 
+// On re-entry, CreatePostgresVM must reuse the existing credentials material
+// rather than regenerating it — otherwise the returned CA and the cloud-init
+// bootstrap would diverge from the credentials Secret (verify-ca failures /
+// wrong password). This covers the asymmetric partial state where the
+// cloud-init Secret was lost but the credentials Secret survived.
+func TestTypedCreatePostgresVMReusesCredentialMaterialOnReentry(t *testing.T) {
+	ctx := context.Background()
+	client := newTestTypedClient(testTypedVMImage())
+	params := testVMCreateParams()
+
+	_, credName, ciName, ca1, err := client.CreatePostgresVM(ctx, params)
+	if err != nil {
+		t.Fatalf("first CreatePostgresVM: %v", err)
+	}
+	cred1, err := client.KubeClient.CoreV1().Secrets("tenant-a").Get(ctx, credName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get credentials Secret: %v", err)
+	}
+	pw1 := cred1.StringData["admin_password"]
+
+	// Simulate the asymmetric partial state: cloud-init gone, credentials kept.
+	if err := client.KubeClient.CoreV1().Secrets("tenant-a").Delete(ctx, ciName, metav1.DeleteOptions{}); err != nil {
+		t.Fatalf("delete cloudinit Secret: %v", err)
+	}
+
+	_, _, _, ca2, err := client.CreatePostgresVM(ctx, params)
+	if err != nil {
+		t.Fatalf("second CreatePostgresVM: %v", err)
+	}
+	if ca2 != ca1 {
+		t.Fatalf("returned CA changed across re-entry: was %q now %q", ca1, ca2)
+	}
+	cred2, err := client.KubeClient.CoreV1().Secrets("tenant-a").Get(ctx, credName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get credentials Secret after re-entry: %v", err)
+	}
+	if got := cred2.StringData["admin_password"]; got != pw1 {
+		t.Fatalf("admin_password changed across re-entry: was %q now %q", pw1, got)
+	}
+	if _, err := client.KubeClient.CoreV1().Secrets("tenant-a").Get(ctx, ciName, metav1.GetOptions{}); err != nil {
+		t.Fatalf("cloudinit Secret not recreated on re-entry: %v", err)
+	}
+}
+
 func TestTypedCreatePostgresVMPreservesVMShape(t *testing.T) {
 	ctx := context.Background()
 	client := newTestTypedClient(testTypedVMImage())
@@ -208,8 +252,8 @@ func TestTypedCreatePostgresVMPreservesVMShape(t *testing.T) {
 	if !strings.Contains(strings.Join(probe.Exec.Command, " "), "pg_isready") {
 		t.Fatalf("ReadinessProbe command does not contain pg_isready: %v", probe.Exec.Command)
 	}
-	if probe.InitialDelaySeconds != 30 || probe.PeriodSeconds != 10 || probe.FailureThreshold != 6 {
-		t.Fatalf("ReadinessProbe timing initial=%d period=%d failure=%d, want 30/10/6",
+	if probe.InitialDelaySeconds != 30 || probe.PeriodSeconds != 10 || probe.FailureThreshold != 12 {
+		t.Fatalf("ReadinessProbe timing initial=%d period=%d failure=%d, want 30/10/12",
 			probe.InitialDelaySeconds, probe.PeriodSeconds, probe.FailureThreshold)
 	}
 
