@@ -27,3 +27,9 @@ override.tf.json
 
 
 .env
+
+docs/plugin-framework-migration-comparison.md
+docs/tenant-space-and-rke2-architecture.md
+docs/interview-deep-dive.md
+docs/testing-plan.md
+docs/argo-test-suite-plan.md
