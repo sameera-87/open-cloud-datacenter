@@ -27,3 +27,13 @@ override.tf.json
 
 
 .env
+
+docs/argo-test-suite-plan.md
+docs/interview-deep-dive.md
+docs/plugin-framework-migration-comparison.md
+docs/resource-provisioning-reference.md
+docs/tenant-space-and-rke2-architecture.md
+docs/testing-plan.md
+docs/vm-cluster-creation-flow.md
+terraform-provider-dcapi_v0.1.0
+

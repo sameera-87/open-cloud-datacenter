@@ -11,7 +11,7 @@ provider "dcapi" {}
 
 resource "dcapi_project" "project-s87" {
 
-  tenant_id = "tenant-s87"
+  tenant_id = "hiran-tenant-1"
   project_id = "testing-project-s87"
   description = "Testing project"
 
