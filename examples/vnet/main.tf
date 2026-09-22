@@ -10,8 +10,8 @@ terraform {
 provider "dcapi" {}
 
 resource "dcapi_project" "example" {
-  tenant_id  = "tenant-s87"
-  project_id = "my-project"
+  tenant_id  = "test-tenant-s87"
+  project_id = "test-project-s87"
 
   name        = "Infrastructure Team"
   description = "Core infrastructure resources: VNets, clusters, and shared VMs."
