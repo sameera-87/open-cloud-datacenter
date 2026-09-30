@@ -181,6 +181,10 @@ func resourceTenantMemberDelete(ctx context.Context, d *schema.ResourceData, met
 	tenantID, principalID := parts[0], parts[1]
 
 	if err := c.DeleteTenantMember(ctx, tenantID, principalID); err != nil {
+		if isNotFound(err) {
+			d.SetId("")
+			return nil // already gone
+		}
 		return diag.FromErr(fmt.Errorf("error deleting tenant member %q: %w", principalID, err))
 	}
 	d.SetId("")

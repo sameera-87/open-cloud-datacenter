@@ -23,6 +23,9 @@ func ResourceBastion() *schema.Resource {
 		CreateContext: resourceBastionCreate,
 		ReadContext:   resourceBastionRead,
 		DeleteContext: resourceBastionDelete,
+		Importer: &schema.ResourceImporter{
+			StateContext: schema.ImportStatePassthroughContext,
+		},
 
 		Timeouts: &schema.ResourceTimeout{
 			Create: schema.DefaultTimeout(15 * time.Minute),
@@ -202,7 +205,10 @@ func resourceBastionRead(ctx context.Context, d *schema.ResourceData, meta inter
 
 	var diags diag.Diagnostics
 	diags = appendSet(diags, d, "bastion_id", bastion.ID)
-	diags = appendSet(diags, d, "tenant_id", bastion.TenantID)
+	// tenant_id/project_id come from the state ID (the slugs the user configured), so an
+	// imported bastion gets both and the response's tenant_id format can't cause a diff.
+	diags = appendSet(diags, d, "tenant_id", tenantID)
+	diags = appendSet(diags, d, "project_id", projectID)
 	diags = appendSet(diags, d, "name", bastion.Name)
 	diags = appendSet(diags, d, "vnet_id", bastion.VNetID)
 	diags = appendSet(diags, d, "subnet_id", bastion.SubnetID)
@@ -235,6 +241,10 @@ func resourceBastionDelete(ctx context.Context, d *schema.ResourceData, meta int
 	tenantID, projectID, bastionID := parts[0], parts[1], parts[2]
 
 	if err := c.DeleteBastion(ctx, tenantID, projectID, bastionID); err != nil {
+		if isNotFound(err) {
+			d.SetId("")
+			return nil // already gone
+		}
 		return diag.FromErr(fmt.Errorf("error deleting bastion %q: %w", bastionID, err))
 	}
 

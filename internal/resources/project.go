@@ -283,6 +283,10 @@ func resourceProjectDelete(ctx context.Context, d *schema.ResourceData, meta int
 	tenantID, projectID := parts[0], parts[1]
 
 	if err := c.DeleteProject(ctx, tenantID, projectID); err != nil {
+		if isNotFound(err) {
+			d.SetId("")
+			return nil // already gone
+		}
 		return diag.FromErr(fmt.Errorf("error deleting project %q in tenant %q: %w", projectID, tenantID, err))
 	}
 	d.SetId("")

@@ -25,6 +25,9 @@ func ResourcePrivateEndpoint() *schema.Resource {
 		CreateContext: resourcePrivateEndpointCreate,
 		ReadContext:   resourcePrivateEndpointRead,
 		DeleteContext: resourcePrivateEndpointDelete,
+		Importer: &schema.ResourceImporter{
+			StateContext: schema.ImportStatePassthroughContext,
+		},
 
 		Schema: map[string]*schema.Schema{
 
@@ -207,6 +210,10 @@ func resourcePrivateEndpointDelete(ctx context.Context, d *schema.ResourceData, 
 	tenantID, projectID, kvID, epID := parts[0], parts[1], parts[2], parts[3]
 
 	if err := c.DeletePrivateEndpoint(ctx, tenantID, projectID, kvID, epID); err != nil {
+		if isNotFound(err) {
+			d.SetId("")
+			return nil // already gone
+		}
 		return diag.FromErr(fmt.Errorf("error deleting PrivateEndpoint %q: %w", epID, err))
 	}
 	return nil

@@ -21,6 +21,9 @@ func ResourcePrivateDnsZone() *schema.Resource {
 		CreateContext: resourcePrivateDnsZoneCreate,
 		ReadContext:   resourcePrivateDnsZoneRead,
 		DeleteContext: resourcePrivateDnsZoneDelete,
+		Importer: &schema.ResourceImporter{
+			StateContext: schema.ImportStatePassthroughContext,
+		},
 
 		Timeouts: &schema.ResourceTimeout{
 			Create: schema.DefaultTimeout(5 * time.Minute),
@@ -187,6 +190,10 @@ func resourcePrivateDnsZoneDelete(ctx context.Context, d *schema.ResourceData, m
 	tenantID, projectID, vnetID, zoneID := parts[0], parts[1], parts[2], parts[3]
 
 	if err := c.DeletePrivateDnsZone(ctx, tenantID, projectID, vnetID, zoneID); err != nil {
+		if isNotFound(err) {
+			d.SetId("")
+			return nil // already gone
+		}
 		return diag.FromErr(fmt.Errorf("error deleting PrivateDnsZone %q: %w", zoneID, err))
 	}
 

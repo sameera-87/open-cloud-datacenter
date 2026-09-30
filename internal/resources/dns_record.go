@@ -17,6 +17,9 @@ func ResourceDnsRecord() *schema.Resource {
 		ReadContext:   resourceDnsRecordRead,
 		UpdateContext: resourceDnsRecordUpdate,
 		DeleteContext: resourceDnsRecordDelete,
+		Importer: &schema.ResourceImporter{
+			StateContext: schema.ImportStatePassthroughContext,
+		},
 
 		Schema: map[string]*schema.Schema{
 
@@ -198,6 +201,10 @@ func resourceDnsRecordDelete(ctx context.Context, d *schema.ResourceData, meta i
 	tenantID, projectID, vnetID, zoneID, recordID := parts[0], parts[1], parts[2], parts[3], parts[4]
 
 	if err := c.DeleteDnsRecord(ctx, tenantID, projectID, vnetID, zoneID, recordID); err != nil {
+		if isNotFound(err) {
+			d.SetId("")
+			return nil // already gone
+		}
 		return diag.FromErr(fmt.Errorf("error deleting DnsRecord %q: %w", recordID, err))
 	}
 	return nil

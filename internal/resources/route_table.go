@@ -231,6 +231,10 @@ func resourceRouteTableDelete(ctx context.Context, d *schema.ResourceData, meta 
 	tenantID, projectID, vnetID, rtID := parts[0], parts[1], parts[2], parts[3]
 
 	if err := c.DeleteRouteTable(ctx, tenantID, projectID, vnetID, rtID); err != nil {
+		if isNotFound(err) {
+			d.SetId("")
+			return nil // already gone
+		}
 		return diag.FromErr(fmt.Errorf("error deleting route table %q: %w", rtID, err))
 	}
 	return nil

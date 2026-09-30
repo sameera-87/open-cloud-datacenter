@@ -20,10 +20,13 @@ func ResourceSubnet() *schema.Resource {
 		CreateContext: resourceSubnetCreate,
 		ReadContext:   resourceSubnetRead,
 		DeleteContext: resourceSubnetDelete,
+		Importer: &schema.ResourceImporter{
+			StateContext: schema.ImportStatePassthroughContext,
+		},
 
 		Timeouts: &schema.ResourceTimeout{
 			Create: schema.DefaultTimeout(5 * time.Minute),
-			Delete: schema.DefaultTimeout(10 * time.Minute),
+			Delete: schema.DefaultTimeout(15 * time.Minute),
 		},
 
 		Schema: map[string]*schema.Schema{
@@ -222,6 +225,10 @@ func resourceSubnetDelete(ctx context.Context, d *schema.ResourceData, meta inte
 	tenantID, projectID, vnetID, subnetID := parts[0], parts[1], parts[2], parts[3]
 
 	if err := c.DeleteSubnet(ctx, tenantID, projectID, vnetID, subnetID); err != nil {
+		if isNotFound(err) {
+			d.SetId("")
+			return nil // already gone
+		}
 		// HTTP 409 means NSG attachments still exist; all must be destroyed first.
 		if strings.Contains(err.Error(), "HTTP 409") {
 			return diag.FromErr(fmt.Errorf(
@@ -270,7 +277,7 @@ func waitForSubnetActive(ctx context.Context, c *client.DCAPIClient, tenantID, p
 
 // waitForSubnetDeleted polls until the Subnet is gone (HTTP 404) after a DELETE call.
 // Deleting the last subnet in a VNet triggers extra cleanup (NAT gateway, CoreDNS teardown),
-// which can add 5-10 minutes of latency — hence the 10-minute timeout.
+// which can take up to 15 minutes (dc-api-reference §9) — hence the 15-minute timeout.
 func waitForSubnetDeleted(ctx context.Context, c *client.DCAPIClient, tenantID, projectID, vnetID, subnetID string, timeout time.Duration) error {
 	conf := &retry.StateChangeConf{
 		Pending:    []string{"ACTIVE", "DELETING"},
