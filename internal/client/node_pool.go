@@ -30,9 +30,11 @@ type NodePoolCreateRequest struct {
 // Taints and Labels use full-replace semantics — send the complete desired state.
 // An empty slice/map clears the existing values; omitting (nil) leaves them unchanged.
 type NodePoolUpdateRequest struct {
-	Count  int               `json:"count"`
-	Taints []NodePoolTaint   `json:"taints,omitempty"`
-	Labels map[string]string `json:"labels,omitempty"`
+	Count int `json:"count"`
+	// No omitempty: taints/labels are full-replace, so an empty list/map must be sent
+	// to clear them. With omitempty, removing the last taint would never reach the API.
+	Taints []NodePoolTaint   `json:"taints"`
+	Labels map[string]string `json:"labels"`
 }
 
 // NodePoolResponse is the shape returned by Create (202) and Read (200).
@@ -110,4 +112,21 @@ func (c *DCAPIClient) DeleteNodePool(ctx context.Context, tenantID, projectID, c
 		return fmt.Errorf("DeleteNodePool (cluster %q, pool %q): %w", clusterID, poolName, err)
 	}
 	return nil
+}
+
+// ListNodePools sends GET /v1/tenants/{tenantID}/projects/{projectID}/clusters/{clusterID}/node-pools.
+// Used by the acceptance-test sweepers to delete a leaked cluster's pools before the cluster.
+func (c *DCAPIClient) ListNodePools(ctx context.Context, tenantID, projectID, clusterID string) ([]NodePoolResponse, error) {
+	path := fmt.Sprintf("/v1/tenants/%s/projects/%s/clusters/%s/node-pools", tenantID, projectID, clusterID)
+
+	respBytes, err := c.doRequest(ctx, "GET", path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("ListNodePools: %w", err)
+	}
+
+	var pools []NodePoolResponse
+	if err := decodeList(respBytes, &pools); err != nil {
+		return nil, fmt.Errorf("ListNodePools: failed to parse response: %w", err)
+	}
+	return pools, nil
 }

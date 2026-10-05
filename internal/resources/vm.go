@@ -305,6 +305,10 @@ func resourceVMDelete(ctx context.Context, d *schema.ResourceData, meta interfac
 	tenantID, projectID, vmID := parts[0], parts[1], parts[2]
 
 	if err := c.DeleteVM(ctx, tenantID, projectID, vmID); err != nil {
+		if isNotFound(err) {
+			d.SetId("")
+			return nil // already gone
+		}
 		return diag.FromErr(fmt.Errorf("error deleting VirtualMachine %q: %w", vmID, err))
 	}
 

@@ -114,3 +114,20 @@ func (c *DCAPIClient) DeleteVM(ctx context.Context, tenantID, projectID, vmID st
 	}
 	return nil
 }
+
+// ListVMs sends GET /v1/tenants/{tenantID}/projects/{projectID}/virtual-machines.
+// Used by the acceptance-test sweepers to find leaked VMs by name.
+func (c *DCAPIClient) ListVMs(ctx context.Context, tenantID, projectID string) ([]VMReadResponse, error) {
+	path := fmt.Sprintf("/v1/tenants/%s/projects/%s/virtual-machines", tenantID, projectID)
+
+	respBytes, err := c.doRequest(ctx, "GET", path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("ListVMs: %w", err)
+	}
+
+	var vms []VMReadResponse
+	if err := decodeList(respBytes, &vms); err != nil {
+		return nil, fmt.Errorf("ListVMs: failed to parse response: %w", err)
+	}
+	return vms, nil
+}

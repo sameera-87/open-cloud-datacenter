@@ -20,6 +20,9 @@ func ResourceVNet() *schema.Resource {
 		CreateContext: resourceVNetCreate,
 		ReadContext:   resourceVNetRead,
 		DeleteContext: resourceVNetDelete,
+		Importer: &schema.ResourceImporter{
+			StateContext: schema.ImportStatePassthroughContext,
+		},
 
 		Timeouts: &schema.ResourceTimeout{
 			Create: schema.DefaultTimeout(5 * time.Minute),
@@ -218,6 +221,10 @@ func resourceVNetDelete(ctx context.Context, d *schema.ResourceData, meta interf
 	tenantID, projectID, vnetID := parts[0], parts[1], parts[2]
 
 	err := c.DeleteVNet(ctx, tenantID, projectID, vnetID)
+	if isNotFound(err) {
+		d.SetId("")
+		return nil // already gone
+	}
 	if err != nil {
 		// HTTP 409 means the VNet still has subnets; all dcapi_subnet resources must be destroyed first.
 		if strings.Contains(err.Error(), "HTTP 409") {

@@ -29,6 +29,9 @@ func ResourceVNetPeering() *schema.Resource {
 		CreateContext: resourceVNetPeeringCreate,
 		ReadContext:   resourceVNetPeeringRead,
 		DeleteContext: resourceVNetPeeringDelete,
+		Importer: &schema.ResourceImporter{
+			StateContext: schema.ImportStatePassthroughContext,
+		},
 
 		Timeouts: &schema.ResourceTimeout{
 			Create: schema.DefaultTimeout(5 * time.Minute),
@@ -214,6 +217,10 @@ func resourceVNetPeeringDelete(ctx context.Context, d *schema.ResourceData, meta
 	tenantID, projectID, vnetID, peeringID := parts[0], parts[1], parts[2], parts[3]
 
 	if err := c.DeleteVNetPeering(ctx, tenantID, projectID, vnetID, peeringID); err != nil {
+		if isNotFound(err) {
+			d.SetId("")
+			return nil // already gone
+		}
 		return diag.FromErr(fmt.Errorf("error deleting VNet peering %q: %w", peeringID, err))
 	}
 
