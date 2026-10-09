@@ -15,3 +15,4 @@ clean:
 	rm -f $(BINARY)
 
 .PHONY: build install clean
+

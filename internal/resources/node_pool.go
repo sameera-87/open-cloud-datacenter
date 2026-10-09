@@ -283,6 +283,10 @@ func resourceNodePoolDelete(ctx context.Context, d *schema.ResourceData, meta in
 	tenantID, projectID, clusterID, poolName := parts[0], parts[1], parts[2], parts[3]
 
 	if err := c.DeleteNodePool(ctx, tenantID, projectID, clusterID, poolName); err != nil {
+		if isNotFound(err) {
+			d.SetId("")
+			return nil // already gone
+		}
 		return diag.FromErr(fmt.Errorf("error deleting node pool %q: %w", poolName, err))
 	}
 

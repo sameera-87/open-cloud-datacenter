@@ -99,3 +99,20 @@ func (c *DCAPIClient) DeleteBastion(ctx context.Context, tenantID, projectID, ba
 	}
 	return nil
 }
+
+// ListBastions sends GET /v1/tenants/{tenantID}/projects/{projectID}/bastions.
+// Used by the acceptance-test sweepers to find leaked bastions by name.
+func (c *DCAPIClient) ListBastions(ctx context.Context, tenantID, projectID string) ([]BastionReadResponse, error) {
+	path := fmt.Sprintf("/v1/tenants/%s/projects/%s/bastions", tenantID, projectID)
+
+	respBytes, err := c.doRequest(ctx, "GET", path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("ListBastions: %w", err)
+	}
+
+	var bastions []BastionReadResponse
+	if err := decodeList(respBytes, &bastions); err != nil {
+		return nil, fmt.Errorf("ListBastions: failed to parse response: %w", err)
+	}
+	return bastions, nil
+}

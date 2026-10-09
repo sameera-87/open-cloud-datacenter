@@ -382,6 +382,10 @@ func resourceClusterDelete(ctx context.Context, d *schema.ResourceData, meta int
 	tenantID, projectID, clusterID := parts[0], parts[1], parts[2]
 
 	if err := c.DeleteCluster(ctx, tenantID, projectID, clusterID); err != nil {
+		if isNotFound(err) {
+			d.SetId("")
+			return nil // already gone
+		}
 		return diag.FromErr(fmt.Errorf("error deleting cluster %q: %w", clusterID, err))
 	}
 

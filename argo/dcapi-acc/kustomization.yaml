@@ -1,0 +1,28 @@
+# kubectl apply -k argo/dcapi-acc
+# The Secrets are not included: create dcapi-acc-member and dcapi-acc-owner from the cluster's
+# secret manager (see secrets.example.yaml and docs/testsuite/02 §3).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: dcapi-tf-acc
+resources:
+  - namespace.yaml
+  - rbac.yaml
+  - dcapi-acc-suite.yaml
+  - resources/dcapi-acc-bastion.yaml
+  - resources/dcapi-acc-cluster.yaml
+  - resources/dcapi-acc-data-sources.yaml
+  - resources/dcapi-acc-dns-record.yaml
+  - resources/dcapi-acc-key-vault-secret.yaml
+  - resources/dcapi-acc-key-vault.yaml
+  - resources/dcapi-acc-node-pool.yaml
+  - resources/dcapi-acc-nsg-attachment.yaml
+  - resources/dcapi-acc-nsg.yaml
+  - resources/dcapi-acc-private-dns-zone.yaml
+  - resources/dcapi-acc-private-endpoint.yaml
+  - resources/dcapi-acc-route-table-association.yaml
+  - resources/dcapi-acc-route-table.yaml
+  - resources/dcapi-acc-service-account.yaml
+  - resources/dcapi-acc-subnet.yaml
+  - resources/dcapi-acc-virtual-machine.yaml
+  - resources/dcapi-acc-vnet-peering.yaml
+  - resources/dcapi-acc-vnet.yaml

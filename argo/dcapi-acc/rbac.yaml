@@ -1,0 +1,36 @@
+# Pod ServiceAccount for every dcapi-acc workflow (docs/testsuite/05 §3.1).
+#
+# The Secrets dcapi-acc-member / dcapi-acc-owner reach pods through envFrom, which the kubelet
+# resolves, so this ServiceAccount needs no "get secrets" permission. Keep "get secrets" in this
+# namespace away from humans who only need to submit workflows (docs/testsuite/02 §3).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dcapi-acc-runner
+  namespace: dcapi-tf-acc
+automountServiceAccountToken: true
+---
+# The minimum the Argo executor (emissary) needs to report step results.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: dcapi-acc-executor
+  namespace: dcapi-tf-acc
+rules:
+  - apiGroups: [argoproj.io]
+    resources: [workflowtaskresults]
+    verbs: [create, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dcapi-acc-executor
+  namespace: dcapi-tf-acc
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: dcapi-acc-executor
+subjects:
+  - kind: ServiceAccount
+    name: dcapi-acc-runner
+    namespace: dcapi-tf-acc

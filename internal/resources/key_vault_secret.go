@@ -23,6 +23,9 @@ func ResourceKeyVaultSecret() *schema.Resource {
 		ReadContext:   resourceKeyVaultSecretRead,
 		UpdateContext: resourceKeyVaultSecretUpdate,
 		DeleteContext: resourceKeyVaultSecretDelete,
+		Importer: &schema.ResourceImporter{
+			StateContext: schema.ImportStatePassthroughContext,
+		},
 
 		Schema: map[string]*schema.Schema{
 
@@ -186,6 +189,11 @@ func resourceKeyVaultSecretDelete(ctx context.Context, d *schema.ResourceData, m
 	tenantID, projectID, keyVaultID, key := parts[0], parts[1], parts[2], parts[3]
 
 	if err := c.DeleteKeyVaultSecret(ctx, tenantID, projectID, keyVaultID, key); err != nil {
+		// 404, or 410 for a secret that is already soft-deleted: either way it's gone.
+		if isNotFound(err) || strings.Contains(err.Error(), "HTTP 410") {
+			d.SetId("")
+			return nil
+		}
 		return diag.FromErr(fmt.Errorf("error deleting KeyVault secret %q: %w", key, err))
 	}
 	d.SetId("")

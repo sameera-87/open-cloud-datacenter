@@ -64,6 +64,8 @@ func (c *DCAPIClient) doRequest(ctx context.Context, method, path string, body i
 
 	var requestBody io.Reader
 
+	const userAgent = "terraform-provider-dcapi/0.1.0"
+
 	if body != nil {
 
 		// create a json file which is represented as byte slice
@@ -98,7 +100,7 @@ func (c *DCAPIClient) doRequest(ctx context.Context, method, path string, body i
 
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Accept", "application/json") // Tells the server what response format you want
-	
+	req.Header.Set("User-Agent", userAgent)
 	// body is nil for GET/DELETE, so don't set Content-Type in that case. Otherwise, set it to application/json.
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")

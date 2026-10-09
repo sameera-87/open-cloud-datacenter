@@ -157,6 +157,10 @@ func resourceNSGAttachmentDelete(ctx context.Context, d *schema.ResourceData, me
 	tenantID, projectID, sgID, attachmentID := parts[0], parts[1], parts[2], parts[3]
 
 	if err := c.DeleteNSGAttachment(ctx, tenantID, projectID, sgID, attachmentID); err != nil {
+		if isNotFound(err) {
+			d.SetId("")
+			return nil // already gone
+		}
 		return diag.FromErr(fmt.Errorf("error deleting NSG attachment %q: %w", attachmentID, err))
 	}
 	return nil

@@ -79,3 +79,20 @@ func (c *DCAPIClient) DeletePrivateEndpoint(ctx context.Context, tenantID, proje
 	}
 	return nil
 }
+
+// ListPrivateEndpoints sends GET /v1/tenants/{tenantID}/projects/{projectID}/keyvaults/{kvID}/private-endpoints.
+// Used by the acceptance-test sweepers to delete a leaked vault's endpoints before the vault.
+func (c *DCAPIClient) ListPrivateEndpoints(ctx context.Context, tenantID, projectID, kvID string) ([]PrivateEndpointResponse, error) {
+	path := fmt.Sprintf("/v1/tenants/%s/projects/%s/keyvaults/%s/private-endpoints", tenantID, projectID, kvID)
+
+	respBytes, err := c.doRequest(ctx, "GET", path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("ListPrivateEndpoints: %w", err)
+	}
+
+	var eps []PrivateEndpointResponse
+	if err := decodeList(respBytes, &eps); err != nil {
+		return nil, fmt.Errorf("ListPrivateEndpoints: failed to parse response: %w", err)
+	}
+	return eps, nil
+}

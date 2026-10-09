@@ -1,0 +1,46 @@
+# Runs the vnet-peering acceptance tests in one pod. Submit on its own to test just this resource;
+# the master (dcapi-acc-suite) uses only the "test" template.
+# Test plan: docs/testsuite/resources/vnet-peering.md
+#
+#   argo submit -n dcapi-tf-acc --from workflowtemplate/dcapi-acc-vnet-peering \
+#     -p image=<registry>/dcapi-acc:<sha> --watch
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: dcapi-acc-vnet-peering
+  labels:
+    app.kubernetes.io/part-of: dcapi-acc
+spec:
+  serviceAccountName: dcapi-acc-runner
+  entrypoint: test
+  onExit: cleanup                        # used only when this template is submitted on its own
+  synchronization:
+    mutexes: [{name: dcapi-acc-project}] # one run at a time (04 §2)
+  podGC: {strategy: OnPodSuccess}        # keep failed pods so their logs can be read
+  arguments:
+    parameters:
+      - name: image                      # e.g. registry.example.com/dcapi-acc:14d3bd6
+      - {name: region, value: lk}
+  templates:
+    - name: test
+      activeDeadlineSeconds: 4200        # Go timeout + 10 min
+      retryStrategy:
+        limit: "1"
+        retryPolicy: OnError             # pod eviction or node loss only, not test failures
+      container:
+        image: "{{workflow.parameters.image}}"
+        command: [/opt/acc/acctest.test]
+        args: ["-test.v", "-test.run=^TestAccVNetPeering_", "-test.timeout=60m"]
+        envFrom:
+          - secretRef: {name: dcapi-acc-member}
+        env:
+          - {name: DCAPI_ACC_RUN_ID, value: "{{=workflow.name[len(workflow.name)-5:]}}"}
+          - {name: DCAPI_ACC_REGION, value: "{{workflow.parameters.region}}"}
+        resources:
+          requests: {cpu: 250m, memory: 256Mi}
+          limits:   {cpu: "1",  memory: 1Gi}
+
+    - name: cleanup
+      steps:
+        - - name: sweep
+            templateRef: {name: dcapi-acc-suite, template: sweep}

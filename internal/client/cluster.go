@@ -147,3 +147,20 @@ func (c *DCAPIClient) GetClusterKubeconfig(ctx context.Context, tenantID, projec
 	}
 	return string(respBytes), nil
 }
+
+// ListClusters sends GET /v1/tenants/{tenantID}/projects/{projectID}/clusters.
+// Used by the acceptance-test sweepers to find leaked clusters by name.
+func (c *DCAPIClient) ListClusters(ctx context.Context, tenantID, projectID string) ([]ClusterReadResponse, error) {
+	path := fmt.Sprintf("/v1/tenants/%s/projects/%s/clusters", tenantID, projectID)
+
+	respBytes, err := c.doRequest(ctx, "GET", path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("ListClusters: %w", err)
+	}
+
+	var clusters []ClusterReadResponse
+	if err := decodeList(respBytes, &clusters); err != nil {
+		return nil, fmt.Errorf("ListClusters: failed to parse response: %w", err)
+	}
+	return clusters, nil
+}

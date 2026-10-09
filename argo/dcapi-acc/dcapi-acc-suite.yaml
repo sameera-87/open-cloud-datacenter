@@ -1,0 +1,73 @@
+# The master: runs every resource template's "test" in parallel, then sweeps this run's leftovers.
+# See docs/testsuite/05-argo-workflows.md §4.
+#
+#   argo submit -n dcapi-tf-acc --from workflowtemplate/dcapi-acc-suite \
+#     -p image=<registry>/dcapi-acc:<sha> -p vm-image-display-name="<display name>" --watch
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: dcapi-acc-suite
+  labels:
+    app.kubernetes.io/part-of: dcapi-acc
+spec:
+  serviceAccountName: dcapi-acc-runner
+  entrypoint: all-resources
+  onExit: sweep
+  activeDeadlineSeconds: 10800            # 3 h hard stop for the whole run
+  synchronization:
+    mutexes: [{name: dcapi-acc-project}]  # one run at a time (04 §2)
+  podGC: {strategy: OnPodSuccess}         # keep failed pods so their logs can be read
+  arguments:
+    parameters:
+      - name: image                       # e.g. registry.example.com/dcapi-acc:14d3bd6
+      - {name: region, value: lk}
+      - {name: vm-image, value: rancher-infra/ubuntu-22-04}
+      - name: vm-image-display-name       # no default: set it once known for the environment
+      - {name: cluster-image, value: rancher-infra/rke2-ubuntu-22-04}
+      - {name: k8s-version, value: v1.33.10+rke2r3}
+      - {name: legacy-network, value: ""}
+  templates:
+    # No task has "depends": every test is self-contained (01 §4.2), so all start together.
+    # dcapi-acc-node-pool is left out: dcapi-acc-cluster already runs the same chained test.
+    - name: all-resources
+      dag:
+        failFast: false                   # one failing resource must not cancel the rest
+        tasks:
+          - {name: data-sources,     templateRef: {name: dcapi-acc-data-sources,            template: test}}
+          - {name: vnet,             templateRef: {name: dcapi-acc-vnet,                    template: test}}
+          - {name: subnet,           templateRef: {name: dcapi-acc-subnet,                  template: test}}
+          - {name: nsg,              templateRef: {name: dcapi-acc-nsg,                     template: test}}
+          - {name: nsg-attachment,   templateRef: {name: dcapi-acc-nsg-attachment,          template: test}}
+          - {name: route-table,      templateRef: {name: dcapi-acc-route-table,             template: test}}
+          - {name: rt-association,   templateRef: {name: dcapi-acc-route-table-association, template: test}}
+          - {name: vnet-peering,     templateRef: {name: dcapi-acc-vnet-peering,            template: test}}
+          - {name: private-dns-zone, templateRef: {name: dcapi-acc-private-dns-zone,        template: test}}
+          - {name: dns-record,       templateRef: {name: dcapi-acc-dns-record,              template: test}}
+          - {name: key-vault,        templateRef: {name: dcapi-acc-key-vault,               template: test}}
+          - {name: kv-secret,        templateRef: {name: dcapi-acc-key-vault-secret,        template: test}}
+          - {name: private-endpoint, templateRef: {name: dcapi-acc-private-endpoint,        template: test}}
+          - {name: virtual-machine,  templateRef: {name: dcapi-acc-virtual-machine,         template: test}}
+          - {name: bastion,          templateRef: {name: dcapi-acc-bastion,                 template: test}}
+          - {name: cluster,          templateRef: {name: dcapi-acc-cluster,                 template: test}}
+          - {name: service-account,  templateRef: {name: dcapi-acc-service-account,         template: test}}
+
+    # Deletes every object named acc-<this run>-*, children before parents (06 §2).
+    # Also used by the resource templates' onExit when they are submitted on their own.
+    - name: sweep
+      activeDeadlineSeconds: 4200         # Go timeout + 10 min
+      container:
+        image: "{{workflow.parameters.image}}"
+        command: [/opt/acc/acctest.test]
+        args:
+          - -test.v
+          - -test.run=^$
+          - -sweep=$(DCAPI_ACC_PROJECT_ID)  # expanded by Kubernetes from the Secret
+          - -sweep-allow-failures
+          - -test.timeout=60m
+        envFrom:
+          - secretRef: {name: dcapi-acc-owner}   # owner: it may have to delete leaked SAs
+        env:
+          - {name: DCAPI_ACC_RUN_ID, value: "{{=workflow.name[len(workflow.name)-5:]}}"}
+        resources:
+          requests: {cpu: 100m, memory: 128Mi}
+          limits:   {cpu: 500m, memory: 512Mi}

@@ -180,6 +180,10 @@ func resourceServiceAccountDelete(ctx context.Context, d *schema.ResourceData, m
 	tenantID, projectID, saID := parts[0], parts[1], parts[2]
 
 	if err := c.DeleteServiceAccount(ctx, tenantID, projectID, saID); err != nil {
+		if isNotFound(err) {
+			d.SetId("")
+			return nil // already gone
+		}
 		return diag.FromErr(fmt.Errorf("error deleting service account %q: %w", saID, err))
 	}
 	d.SetId("")

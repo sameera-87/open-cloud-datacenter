@@ -252,6 +252,10 @@ func resourceNSGDelete(ctx context.Context, d *schema.ResourceData, meta interfa
 	tenantID, projectID, sgID := parts[0], parts[1], parts[2]
 
 	if err := c.DeleteNSG(ctx, tenantID, projectID, sgID); err != nil {
+		if isNotFound(err) {
+			d.SetId("")
+			return nil // already gone
+		}
 		return diag.FromErr(fmt.Errorf("error deleting network security group %q: %w", sgID, err))
 	}
 	return nil

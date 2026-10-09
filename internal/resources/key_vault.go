@@ -20,6 +20,9 @@ func ResourceKeyVault() *schema.Resource {
 		ReadContext:   resourceKeyVaultRead,
 		UpdateContext: resourceKeyVaultUpdate,
 		DeleteContext: resourceKeyVaultDelete,
+		Importer: &schema.ResourceImporter{
+			StateContext: schema.ImportStatePassthroughContext,
+		},
 
 		Timeouts: &schema.ResourceTimeout{
 			// KeyVault provisioning is lightweight (OpenBao mount setup); 5 minutes is ample.
@@ -268,6 +271,10 @@ func resourceKeyVaultDelete(ctx context.Context, d *schema.ResourceData, meta in
 	tenantID, projectID, keyVaultID := parts[0], parts[1], parts[2]
 
 	if err := c.DeleteKeyVault(ctx, tenantID, projectID, keyVaultID); err != nil {
+		if isNotFound(err) {
+			d.SetId("")
+			return nil // already gone
+		}
 		return diag.FromErr(fmt.Errorf("error deleting KeyVault %q: %w", keyVaultID, err))
 	}
 	

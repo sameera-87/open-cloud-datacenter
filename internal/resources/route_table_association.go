@@ -158,6 +158,10 @@ func resourceRouteTableAssociationDelete(ctx context.Context, d *schema.Resource
 	tenantID, projectID, vnetID, rtID, assocID := parts[0], parts[1], parts[2], parts[3], parts[4]
 
 	if err := c.DeleteRouteTableAssociation(ctx, tenantID, projectID, vnetID, rtID, assocID); err != nil {
+		if isNotFound(err) {
+			d.SetId("")
+			return nil // already gone
+		}
 		return diag.FromErr(fmt.Errorf("error deleting route table association %q: %w", assocID, err))
 	}
 	return nil

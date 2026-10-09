@@ -82,3 +82,20 @@ func (c *DCAPIClient) DeleteServiceAccount(ctx context.Context, tenantID, projec
 	}
 	return nil
 }
+
+// ListServiceAccounts sends GET /v1/tenants/{tenantID}/projects/{projectID}/service-accounts.
+// Requires an owner SA. Used by the acceptance-test sweepers to find leaked SAs by name.
+func (c *DCAPIClient) ListServiceAccounts(ctx context.Context, tenantID, projectID string) ([]ServiceAccountResponse, error) {
+	path := fmt.Sprintf("/v1/tenants/%s/projects/%s/service-accounts", tenantID, projectID)
+
+	respBytes, err := c.doRequest(ctx, "GET", path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("ListServiceAccounts: %w", err)
+	}
+
+	var sas []ServiceAccountResponse
+	if err := decodeList(respBytes, &sas); err != nil {
+		return nil, fmt.Errorf("ListServiceAccounts: failed to parse response: %w", err)
+	}
+	return sas, nil
+}
